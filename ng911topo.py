@@ -948,8 +948,8 @@ def _self_test(tmp):
           "the clipped area differs from the uncut area by less than the re-measure margin")
 
     def nudged(geom, x0, y0, x1, y1):
-        # A clip that loses 2.5e-7 sq m, the size of the difference measured
-        # in length by the check this idea comes from, against a 1e-3 margin.
+        # A clip that loses 2.5e-7 sq m: far below any real threshold, and
+        # enough to flip a verdict that sits a hair under it.
         return shapely.clip_by_rect(geom, x0, y0, x1 - 2.5e-8, y1)
 
     tol = 50.0 - 1e-7
