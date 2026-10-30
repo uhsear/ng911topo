@@ -48,6 +48,10 @@ PASS  a boundary layer in the wrong place or CRS is refused with both reasons  <
 ...
 PASS  a geographic layer that still reads as degrees is caught as re-tagged  <-- pinned defect
 ...
+PASS  degree polygons are refused under Web Mercator and nothing is printed  <-- pinned defect
+...
+PASS  an end that lands on its own line's body is joined, so a lollipop is not fallout against its neighbour  <-- pinned defect
+...
 PASS  a prefix of the write flag is refused and nothing is written  <-- pinned defect
 PASS  the prefix --ap is refused by the parser  <-- pinned defect
 ...
@@ -58,10 +62,10 @@ PASS  a full run opens no socket, and the guard would have caught one
 PASS  an unexpected exception exits 70, not the 1 that means a gate failed  <-- pinned defect
 ...
 --------------------------------------------------------------------
-158 assertions, 0 failed
+220 assertions, 0 failed
 ```
 
-The full run prints all 158 assertions. Each `...` line above is where this block is cut. The line
+The full run prints all 220 assertions. Each `...` line above is where this block is cut. The line
 that starts with `info:` is a measurement, not an assertion. It is explained in
 [The equivalence argument](#the-equivalence-argument-the-clip-and-the-re-measure).
 
@@ -95,17 +99,24 @@ Python 3.9 or newer, [shapely](https://shapely.readthedocs.io/) 2 or newer, and
 standard-library only. No `arcpy`, no network, no database. The inputs are GeoJSON files, which
 every GIS can export.
 
-The self-test prints 158 assertions on every host below, and each run ends with `158 assertions,
-0 failed`. `coverage run --branch ng911topo.py --self-test` reports 100 percent of 1040 statements
-and 248 branches on all three.
+The self-test prints 220 assertions on every interpreter below, and each run ends with `220
+assertions, 0 failed`. `coverage run --branch ng911topo.py --self-test` reports 100 percent of
+1235 statements and 268 branches (run on the geo venv row).
 
 | Host | Python | shapely | pyproj |
 |---|---|---|---|
-| Windows | 3.13.2 | 2.1.2 | 3.7.2 |
-| Windows | 3.9.25 | 2.0.7 | 3.6.1 |
-| Ubuntu | 3.12.3 | 2.1.2 | 3.8.0 |
+| Windows, system install | 3.13.2 | 2.1.2 | 3.7.2 |
+| Windows, venv | 3.13.2 | 2.1.2 | 3.8.0 |
+| Windows, venv | 3.9.25 | 2.0.7 | 3.6.1 |
+| Ubuntu, venv | 3.12.3 | 2.1.2 | 3.8.0 |
 
-The demo runs below produce the same text, line for line, on Windows (3.13.2) and on Ubuntu.
+The system `python3` on a stock Ubuntu has neither shapely nor pyproj. There `python3
+ng911topo.py --self-test` exits 69 and says what is missing. Install both in a virtual environment
+first.
+
+The demo runs below produce the same text on the Windows venv and on Ubuntu. The only difference
+is that Windows writes `
+` line endings when the output is redirected to a file.
 
 ```
 git clone https://github.com/uhsear/ng911topo.git
@@ -161,8 +172,79 @@ exit=64
 
 The `usage:` text is cut in this block to its first line. The tool prints the whole of it.
 
-`--out` must name a new file. A path that is also an input layer is refused with exit 64, on a dry
-run too.
+`--out` must not be an input layer. That is refused with exit 64, on a dry run too. A file that
+already exists is overwritten under `--apply`, with no prompt and no backup. The tool compares
+`--out` with the inputs by resolved path only, so a hard link or a Windows short-name alias of an
+input is not noticed.
+
+## The demo files
+
+Every output block below comes from these synthetic layers. They are not shipped as files. Save the
+script as `mkdemo.py`, run it in an empty folder, and the layers appear next to it. Coordinates
+are in EPSG:26917. The two other street layers are the same streets in US survey feet (EPSG:2237)
+and in degrees (EPSG:4326).
+
+```python
+import json
+import pyproj
+import shapely
+from shapely.geometry import Polygon, box, mapping
+
+BX, BY = 400000.0, 3250000.0
+
+
+def save(name, features):
+    with open(name, "w") as fh:
+        json.dump({"type": "FeatureCollection", "features": features}, fh)
+
+
+def area(key, geom):
+    geom = shapely.affinity.translate(geom, BX, BY)
+    return {"type": "Feature", "properties": {"KEY": key}, "geometry": mapping(geom)}
+
+
+def street(key, pts):
+    coords = [[BX + x, BY + y] for x, y in pts]
+    return {"type": "Feature", "properties": {"SEGMENT_ID": key},
+            "geometry": {"type": "LineString", "coordinates": coords}}
+
+
+def frame(tag, x, y, w, h):
+    return [(tag + "-W", box(x - 10, y - 10, x, y + h + 10)),
+            (tag + "-E", box(x + w, y - 10, x + w + 10, y + h + 10)),
+            (tag + "-S", box(x, y - 10, x + w, y)),
+            (tag + "-N", box(x, y + h, x + w, y + h + 10))]
+
+
+rows = [("ZONE-1", box(0, 0, 100, 100)), ("ZONE-2", box(90, 0, 190, 100)),
+        ("ZONE-3", box(190, 0, 290, 100)), ("ZONE-4", box(300, 0, 400, 100)),
+        ("ZONE-5", box(399.995, 0, 500, 100))]
+rows += frame("GAP", 1000, 0, 2, 100) + frame("WIDE", 2000, 0, 10, 100)
+rows += frame("CRACK", 3000, 0, 0.1, 100)
+ring = Polygon(box(4000, 0, 4040, 40).exterior.coords,
+               [box(4015, 15, 4025, 25).exterior.coords])
+save("areas.geojson", [area(k, g) for k, g in rows + [("RING", ring)]])
+
+streets = [street("MAIN", [(0, 0), (1000, 0)])]
+for n, d in enumerate((6.5, 7.0, 7.2, 7.6)):
+    streets.append(street("STUB-%d" % (n + 1), [(100 * (n + 1), d), (100 * (n + 1), 50)]))
+streets += [street("LANE", [(700, 1), (700, 60)]), street("EDGE-W", [(5, -305), (5, -30)]),
+            street("OUT", [(900, 600), (900, 1100)])]
+save("streets.geojson", streets)
+save("extent.geojson", [area("EXTENT", box(-20, -310, 1020, 1000))])
+save("elsewhere.geojson", [area("ELSEWHERE", box(50000, 0, 51000, 1000))])
+
+
+def reproject(epsg, name):
+    tr = pyproj.Transformer.from_crs(26917, epsg, always_xy=True)
+    moved = [dict(f, geometry={"type": "LineString", "coordinates": [
+        list(tr.transform(x, y)) for x, y in f["geometry"]["coordinates"]]}) for f in streets]
+    save(name, moved)
+
+
+reproject(2237, "streets_ft.geojson")
+reproject(4326, "streets_ll.geojson")
+```
 
 ## The sliver gate
 
@@ -237,7 +319,7 @@ tool sorts every dangle into one of three classes.
 |---|---|---|
 | `fallout` | REPORTED | The end stops within the snap tolerance of another street and is not joined to it. It fails the gate. |
 | `isolated` | INFO | A dead end. The nearest street is beyond the snap tolerance. It is listed and passes. |
-| `boundary` | SUPPRESSED | The end lies on or beyond the boundary layer, or within the snap tolerance of its edge. |
+| `boundary` | SUPPRESSED | The end lies outside the boundary layer, or within the snap tolerance of its edge. The row names a street that is also within the snap tolerance. |
 
 The distances of the `fallout` ends go into a histogram, and the busiest bin is marked. Four stubs
 that stop 6.5 to 7.6 m short of one street show up as one bar. A tool that prints a flat list
@@ -246,7 +328,8 @@ shows them as four lines among hundreds.
 Two street ends within `--node-tol` of each other are one node, found by single linkage. The tool
 does not round to a grid. Two ends 0.0002 m apart can fall either side of a rounding boundary and
 look like two dangles. The self-test pins that case. An end within `--node-tol` of another street's
-body is a T junction, and it is not a dangle.
+body is a T junction, and it is not a dangle. So is an end that lands on the body of its own line,
+such as a P-shaped cul-de-sac drawn as one line.
 
 ```
 $ python ng911topo.py --streets streets.geojson --streets-epsg 26917 --work-epsg 26917 --sample 4
@@ -275,7 +358,8 @@ exit=1
 ```
 
 Without a boundary layer, the report says so on its own line. With one, the ends that leave the area
-move to SUPPRESSED and keep a row:
+move to SUPPRESSED and keep a row. The first row below is an end 5 m inside the edge of the layer.
+The second is an end beyond it:
 
 ```
 $ python ng911topo.py --streets streets.geojson --streets-epsg 26917 --boundary extent.geojson --boundary-epsg 26917 --work-epsg 26917 --sample 4
@@ -301,8 +385,8 @@ SNAPGAP
     STUB-2 at (400200.00, 3250050.00): isolated dead end, nothing within 9 m
     ... 5 more; --out lists them all
   SUPPRESSED (2)
-    EDGE-W at (400005.00, 3249695.00): end on or beyond the boundary layer, so it leaves the area legitimately
-    OUT at (400900.00, 3251100.00): end on or beyond the boundary layer, so it leaves the area legitimately
+    EDGE-W at (400005.00, 3249695.00): end lies within 9 m of the boundary edge, so it is taken to leave the area
+    OUT at (400900.00, 3251100.00): end lies outside the boundary layer, so it leaves the area
 exit=1
 ```
 
@@ -313,7 +397,8 @@ nothing, and the run prints every end at the edge of the data as a finding. This
 a reason to stop. It checks the layer against the street ends before it uses it. The layer must have
 area, it must overlap the streets, and it must hold at least `--min-boundary-cover` of the street
 ends once it is grown by the snap tolerance. A layer that fails is refused with exit 3, and no
-finding is printed. A layer that cannot be read exits 2, also with no finding.
+finding is printed. A layer that cannot be read exits 2, also with no finding. The demo layer
+`elsewhere.geojson` is a box 50 km east of the streets.
 
 ```
 $ python ng911topo.py --streets streets.geojson --streets-epsg 26917 --boundary elsewhere.geojson --boundary-epsg 26917 --work-epsg 26917
@@ -333,7 +418,7 @@ wrong place, or too small, the run prints nothing to standard output.
 
 ## The CRS is proved, not trusted
 
-An EPSG tag is a claim. The tool checks three things before it measures anything.
+An EPSG tag is a claim. The tool checks four things before it measures anything.
 
 1. The work CRS must be projected and measure in metres. A geographic CRS has no length in its
    units, and a CRS in feet would make every threshold wrong by a factor of 3.28. Either is refused.
@@ -341,9 +426,19 @@ An EPSG tag is a claim. The tool checks three things before it measures anything
    0.1 degree margin. Coordinates in metres tagged as feet fall far outside it. PROJ lists
    EPSG:4269 with a west bound (167.65) greater than its east bound (-40.73), because the area
    crosses the antimeridian. The tool reads that as two spans. The self-test pins that case.
-3. After the transform, the tool compares one pair of vertices before and after. A projected source
-   must scale by the unit of its input, within 0.5 percent. A geographic source must no longer look
-   like longitude and latitude. A layer that was re-tagged and not reprojected fails this check.
+3. The data must also fall inside the area of use of the work CRS, with the same margin. A UTM
+   zone 1000 km from the data would measure every area wrong, so it is refused.
+4. After the transform, the tool compares one pair of vertices before and after, the first and the
+   one farthest from it. A projected source must scale by the unit of its input, within 0.5
+   percent. A geographic source must no longer look like longitude and latitude, and the output
+   distance must match the geodesic distance on the WGS 84 ellipsoid, within 0.5 percent. A layer
+   that was re-tagged and not reprojected fails this check. So does a work CRS that is not
+   metre-scale at the data, such as Web Mercator.
+
+The area of use comes from [`CRS.area_of_use`](https://pyproj4.github.io/pyproj/stable/api/crs/crs.html).
+The geodesic distance comes from [`Geod.inv`](https://pyproj4.github.io/pyproj/stable/api/geod.html)
+on the WGS 84 ellipsoid, with longitude first. EPSG:4269 uses the GRS 80 ellipsoid, which differs
+from WGS 84 by far less than the 0.5 percent tolerance.
 
 A GeoJSON file that carries a legacy `crs` member must name the same EPSG as the flag, or the run is
 refused. RFC 7946 removed that member ([section 4](https://www.rfc-editor.org/rfc/rfc7946#section-4)),
@@ -372,6 +467,30 @@ SNAPGAP
 exit=1
 ```
 
+The same streets in degrees give the same findings. The scale proof compares against the
+geodesic distance. This block shows only the note line, and the tool prints the whole report:
+
+```
+$ python ng911topo.py --streets streets_ll.geojson --streets-epsg 4326 --work-epsg 26917 --sample 1
+streets_ll.geojson: EPSG:4326 -> EPSG:26917, output is no longer degree-like; scale ratio 0.99973 against the geodesic distance; PROJ accuracy -1.0 (-1 means unknown)
+...
+```
+
+Web Mercator and a UTM zone far from the data are refused, because they would measure the data
+wrong. At this latitude Web Mercator reads a distance 15 percent long:
+
+```
+$ python ng911topo.py --streets streets_ll.geojson --streets-epsg 4326 --work-epsg 3857
+refused: streets_ll.geojson: the scale ratio is 1.15024 against the geodesic distance where a metre CRS at this place says 1; the work CRS is not metre-scale here (Web Mercator, EPSG:3857, is not, and a UTM zone far from the data is not). Name a projected CRS for this place
+exit=3
+```
+
+```
+$ python ng911topo.py --streets streets_ll.geojson --streets-epsg 4326 --work-epsg 26910
+refused: streets_ll.geojson: the data spans lon -82.03..-82.02, lat 29.37..29.39, outside the area of use of the work CRS EPSG:26910 (lon -126.00..-119.99, lat 30.54..81.80). Name a work CRS that covers the data.
+exit=3
+```
+
 The metre file, tagged as feet, is refused:
 
 ```
@@ -380,7 +499,7 @@ refused: streets.geojson: the data spans lon -82.84..-82.83, lat 33.27..33.27, o
 exit=3
 ```
 
-The proof covers units. It does not prove that the datum shift was right. The accuracy figure in the
+The proof covers units and the scale of the work CRS. It does not prove that the datum shift was right. The accuracy figure in the
 note is whatever pyproj reports for the operation
 ([Transformer.accuracy](https://pyproj4.github.io/pyproj/stable/api/transformer.html) says -1 means
 unknown). Here it prints 0.0, and the tool does not interpret it.
@@ -430,13 +549,13 @@ What is measured and what is argued:
 | Code | Meaning |
 |---|---|
 | 0 | Something was compared and no gate failed. INFO and SUPPRESSED findings do not fail a gate. |
-| 1 | A gate failed: an overlap, a gap or a street end that stops short. |
-| 2 | A file could not be read or written. |
+| 1 | A gate failed: an overlap, a gap or a street end that stops short. A failed `--self-test` also returns 1, so read its `N assertions, M failed` footer, not only the code. |
+| 2 | A file could not be read or written. The message names the file. Any `ValueError` raised inside the analysis, including one from a library, also exits 2. |
 | 3 | The run was refused: a CRS, a geometry or the boundary layer cannot be trusted. Nothing goes to standard output. |
-| 4 | Nothing was compared. Every layer was empty. This is never reported as clean. |
+| 4 | Nothing was compared, or a named layer held no features. When one layer was empty and the other was compared, the report of the other layer prints first, and the exit is 4 even if that layer failed a gate. Neither case is reported as clean. |
 | 64 | Usage error, including an abbreviated flag. |
 | 69 | shapely 2 or pyproj is not installed. |
-| 70 | An unexpected crash. This is a fault in the tool and is never a finding. |
+| 70 | An unexpected crash. This is a fault in the tool and is never a finding. Output sent to a pipe that closes early, such as `head`, ends here with a traceback. |
 
 A polygon that is not valid refuses the run with exit 3, because every area derived from it would be
 wrong. A feature with no geometry is counted in the notes and skipped.
@@ -511,11 +630,52 @@ and `y` are in the work CRS. A row sits inside the overlap or hole, so an analys
   self-test. A statewide layer is not what this is for.
 - The gap check finds holes in the dissolved coverage. A strip along the outer edge of the whole
   coverage is not a hole and is not found. An open channel that reaches the outer edge is not a hole.
+  A strip that runs across the whole coverage, such as a 5 m strip that fully separates two
+  polygons, reaches the outer edge at both ends. It is not a hole either, and the run exits 0 with
+  `0 uncovered hole(s)`.
 - The default thresholds are starting values for a metre CRS, not measurements. Measure your own
   layers. The nearest case above each gate is printed so that you can.
 - A hole that is drawn into one polygon is treated as deliberate. A wide hole ringed by several
   polygons is a suspect, and the tool cannot tell more than that.
 - The reprojection proof covers units. It does not prove the datum shift.
+- The tool checks the CRS tag by area of use and by unit scale only. A layer in metres that is
+  tagged with a feet CRS passes both checks if its coordinates fall inside the area of use of that
+  CRS.
+- An axis-swapped GeoJSON file (latitude first) tagged EPSG:4326 passes, because the area of use of
+  4326 is the whole world. The proof cannot catch swapped axes on a world-wide CRS, and areas and
+  distances then come out wrong.
+- A threshold given as `nan` or `inf`, such as `--overlap-tol nan` or `--min-gap-width nan`, is
+  accepted. Every comparison is false, so every case is dropped and the run exits 0 with a real
+  overlap suppressed. The gate text still prints the value. Pass finite numbers.
+- A coordinate of `NaN` or `Infinity` in GeoJSON is not valid JSON, but Python reads it. `Infinity`
+  is refused with exit 3 by the area-of-use check. A `NaN` is not refused: a street with an end at
+  `(nan, y)` is listed as an INFO isolated dead end and the run exits 0, and a `NaN` in one
+  position of one street can also raise a shapely `RuntimeWarning` and exit 1. GeoJSON from
+  standard tools never carries `NaN`.
+- A GeoJSON file saved with a UTF-8 byte order mark exits 2 with `Unexpected UTF-8 BOM (decode
+  using utf-8-sig)`. It is refused and never read as clean, but Windows tools write such files
+  often. Save the file as UTF-8 without a BOM.
+- A GeoJSON file in Latin-1, UTF-16 or another encoding that is not UTF-8 exits 2 with a decode
+  error. Only UTF-8 is read.
+- The findings CSV is UTF-8 without a byte order mark, so Excel may show a non-ASCII key wrongly.
+- A key that holds an escape character or a line break is printed to the terminal as it came, so a
+  hostile file can clear the screen, set the window title or forge a line that looks like a
+  finding. Run the tool on files you trust.
+- A street end that lies outside the boundary layer, or within the snap tolerance of its edge, is
+  SUPPRESSED even when another street is nearer than the snap tolerance. A real fallout near the
+  edge can therefore be listed only as suppressed, and the run exits 0. The row names that street,
+  but this rule hides real gaps next to the edge. A boundary layer that holds only half of the
+  street ends passes the default check and then hides the fallout at the other half. Raise
+  `--min-boundary-cover` for a partial layer.
+- Street ends within `--node-tol` of each other count as one shared node, so a dangling stub of
+  0.05 m or less is never reported. A closed loop whose two ends meet within that distance, and that
+  joins no other street, is not reported either. A zero-length street is one node and is never
+  reported.
+- The wording of some messages, the counts in the histogram header and the order of INFO and
+  SUPPRESSED rows are checked by the self-test only for their main phrases, not word for word.
+- A stock Linux `python3` may have no shapely. The self-test then exits 69, and it needs a virtual
+  environment with shapely 2 and pyproj. Python 3.9 was checked in a virtual environment with
+  shapely 2.0.7 and pyproj 3.6.1.
 - A MultiLineString becomes one street per part. Z values are dropped.
 - The findings file is written in place, not through a temporary file. A failed write can leave a
   partial file, and the exit code is 2. A key that starts with `=`, `+`, `-` or `@` is written as it
@@ -523,8 +683,11 @@ and `y` are in the work CRS. A row sits inside the overlap or hole, so an analys
 - A character that the console cannot show prints as `?`. The file is always UTF-8.
 - The ArcGIS pages for the "must not have gaps" and "must not have dangles" rules did not load when
   this was written, so the comparison above cites only the QGIS manual for those two rules.
-- Network: none. The tool opens no socket. The self-test replaces `socket.connect`, runs the tool,
-  and asserts that no connection was tried, and that its own guard would have caught one. There is
+- Network: none. PROJ reads `PROJ_NETWORK` from the environment, and the tool never sets it
+  ([PROJ environment variables](https://proj.org/en/stable/usage/environmentvars.html)). With
+  `PROJ_NETWORK=ON`, PROJ may fetch a datum grid during a reprojection, and then this line no longer
+  holds. Apart from that, the tool opens no socket. The self-test replaces `socket.connect`, runs the
+  tool, and asserts that no connection was tried, and that its own guard would have caught one. There is
   no stub server because there is nothing to call.
 - Every line and branch of the module is reached by the self-test, so there is no uncovered line to
   explain.
@@ -550,4 +713,3 @@ MIT.
   centerline against the polygon that side fronts.
 - [ringwind](https://github.com/uhsear/ringwind) names GeoJSON rings wound the wrong way. Run it
   first if a polygon is refused as not valid.
-- ng911check (private, in progress) runs the attribute and centerline checks.

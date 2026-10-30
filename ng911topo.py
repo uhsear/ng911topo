@@ -28,8 +28,9 @@ suppressed cases in its output.
 
 Every input names its EPSG code. The tool never assumes one. Inputs are
 reprojected to the work CRS, which must be projected and in metres, and the
-reprojection is checked: the data must fall inside the stated CRS's area of
-use, and the scale of the output must match the unit of the input.
+reprojection is checked: the data must fall inside the area of use of the
+stated CRS and of the work CRS, and the scale of the output must match the
+unit of the input, or the geodesic distance for a geographic input.
 Nothing is written without --apply.
 
 Exit codes: 0 something was compared and no gate failed, 1 a gate failed
@@ -271,10 +272,12 @@ def work_crs_problem(facts):
     return None
 
 
-def aou_verdict(aou, bounds, margin):
+def aou_verdict(aou, bounds, margin, whose="its CRS",
+                advice="The EPSG tag is probably wrong."):
     """Whether data at bounds (west, south, east, north in degrees) lies in
-    the area of use of the CRS it is tagged with. Returns (problem, note).
-    A comparison that fails on nan refuses, which is the safe side."""
+    the area of use of a CRS, the one it is tagged with or the work CRS.
+    Returns (problem, note). A comparison that fails on nan refuses, which is
+    the safe side."""
     if aou is None:
         return None, "area of use unknown to PROJ, so the tag is unchecked"
     w, s, e, n = aou
@@ -288,11 +291,12 @@ def aou_verdict(aou, bounds, margin):
     if lon_ok and s - margin <= y0 and y1 <= n + margin:
         return None, None
     return ("the data spans lon %.2f..%.2f, lat %.2f..%.2f, outside the area "
-            "of use of its CRS (lon %.2f..%.2f, lat %.2f..%.2f). The EPSG "
-            "tag is probably wrong." % (x0, x1, y0, y1, w, e, s, n)), None
+            "of use of %s (lon %.2f..%.2f, lat %.2f..%.2f). %s"
+            % (x0, x1, y0, y1, whose, w, e, s, n, advice)), None
 
 
-def prove_reprojection(src_geographic, factor, a_src, b_src, a_out, b_out):
+def prove_reprojection(src_geographic, factor, a_src, b_src, a_out, b_out,
+                       geodesic=None):
     """Decide from two vertices, before and after, whether the layer was
     reprojected and not merely re-tagged. Returns (ok, text).
 
@@ -300,14 +304,33 @@ def prove_reprojection(src_geographic, factor, a_src, b_src, a_out, b_out):
     two vertices must equal the input distance times the metres-per-unit of
     the input CRS. A geographic source has no length in degrees to compare,
     so the output must differ from the input and must no longer fit in the
-    range of longitude and latitude. This proves units, not the datum shift."""
+    range of longitude and latitude. Then, when the caller passes the geodesic
+    distance in metres between the two vertices, the output distance must
+    match it. That catches a work CRS that is far from the data or is not
+    metre-scale there (Web Mercator). This proves units and the scale of the
+    work CRS, not the datum shift."""
     if src_geographic:
         moved = tuple(a_out) != tuple(a_src)
         big = max(abs(a_out[0]), abs(a_out[1])) > 360.0
-        if moved and big:
+        if not (moved and big):
+            return False, ("the output still looks like longitude and "
+                           "latitude, so the layer was re-tagged, not "
+                           "reprojected")
+        if geodesic is None:
             return True, "output is no longer degree-like"
-        return False, ("the output still looks like longitude and latitude, "
-                       "so the layer was re-tagged, not reprojected")
+        if geodesic <= 0.0:
+            return False, ("every vertex is at one location, so the scale "
+                           "of the reprojection cannot be proved")
+        ratio = math.hypot(b_out[0] - a_out[0], b_out[1] - a_out[1]) / geodesic
+        if abs(ratio - 1.0) <= PROOF_TOL:
+            return True, ("output is no longer degree-like; scale ratio "
+                          "%.5f against the geodesic distance" % ratio)
+        return False, ("the scale ratio is %.5f against the geodesic "
+                       "distance where a metre CRS at this place says 1; "
+                       "the work CRS is not metre-scale here (Web Mercator, "
+                       "EPSG:3857, is not, and a UTM zone far from the data "
+                       "is not). Name a projected CRS for this place"
+                       % ratio)
     d_src = math.hypot(b_src[0] - a_src[0], b_src[1] - a_src[1])
     if d_src == 0.0:
         return False, ("every vertex is at one location, so the scale of the "
@@ -330,14 +353,19 @@ def convert_layer(feats, src, work, label, margin=AOU_MARGIN_DEG):
     to_ll = pyproj.Transformer.from_crs(src["epsg"], 4326, always_xy=True)
     lons, lats = to_ll.transform([xmin, xmin, xmax, xmax],
                                  [ymin, ymax, ymin, ymax])
-    problem, aou_note = aou_verdict(
-        src["aou"], (min(lons), min(lats), max(lons), max(lats)), margin)
+    bounds = (min(lons), min(lats), max(lons), max(lats))
+    problem, aou_note = aou_verdict(src["aou"], bounds, margin)
     if problem:
         raise Refusal("%s: %s" % (label, problem))
     if src["epsg"] == work["epsg"]:
         note = ("%s: EPSG:%d is the work CRS, not transformed"
                 % (label, src["epsg"]))
         return feats, note + ("; " + aou_note if aou_note else "")
+    problem, _ = aou_verdict(
+        work["aou"], bounds, margin, "the work CRS EPSG:%d" % work["epsg"],
+        "Name a work CRS that covers the data.")
+    if problem:
+        raise Refusal("%s: %s" % (label, problem))
     tr = pyproj.Transformer.from_crs(src["epsg"], work["epsg"], always_xy=True)
     out = [shapely.ops.transform(tr.transform, g) for g in geoms]
     before = shapely.get_coordinates(geoms).tolist()
@@ -345,8 +373,13 @@ def convert_layer(feats, src, work, label, margin=AOU_MARGIN_DEG):
     far = max(range(len(before)),
               key=lambda n: (before[n][0] - before[0][0]) ** 2
               + (before[n][1] - before[0][1]) ** 2)
+    geodesic = None
+    if src["geographic"]:
+        geodesic = pyproj.Geod(ellps="WGS84").inv(
+            before[0][0], before[0][1], before[far][0], before[far][1])[2]
     ok, text = prove_reprojection(src["geographic"], src["factors"][0],
-                                  before[0], before[far], after[0], after[far])
+                                  before[0], before[far], after[0], after[far],
+                                  geodesic)
     if not ok:
         raise Refusal("%s: %s" % (label, text))
     note = ("%s: EPSG:%d -> EPSG:%d, %s; PROJ accuracy %s (-1 means unknown)"
@@ -433,7 +466,10 @@ def prepare_layer(path, epsg, work, label, kind, key_field):
     """Read one GeoJSON layer and bring it to the work CRS. Returns
     (feats, notes). OSError and ValueError mean the file could not be read."""
     with io.open(path, "r", encoding="utf-8") as fh:
-        doc = json.load(fh)
+        try:
+            doc = json.load(fh)
+        except ValueError as exc:
+            raise ValueError("%s: %s" % (label, exc))
     declared = declared_epsg(doc) if isinstance(doc, dict) else None
     if declared is not None and declared != epsg:
         raise Refusal("%s: the file declares EPSG:%d and the flag says "
@@ -595,6 +631,25 @@ def endpoints_of(lines):
     return out
 
 
+def lands_on_own_body(line, at_start, node_tol):
+    """Whether the chosen end of a line comes back to the line's own body, as
+    the end of a P-shaped cul-de-sac drawn as one line does. The first
+    segment, which holds the end, and any vertices within node_tol of it are
+    left out, so the end does not match itself."""
+    coords = list(line.coords)
+    if not at_start:
+        coords.reverse()
+    end = shapely.Point(coords[0])
+    first = 1
+    while (first < len(coords)
+           and end.distance(shapely.Point(coords[first])) <= node_tol):
+        first += 1
+    rest = coords[first:]
+    if len(rest) < 2:
+        return False
+    return shapely.LineString(rest).distance(end) <= node_tol
+
+
 def vet_boundary(boundary, ends, snap, min_cover):
     """Reasons a boundary layer cannot be trusted to suppress dangles. An
     empty list means it can. Each reason is checked against the street ends,
@@ -658,7 +713,8 @@ def classify_dangles(lines, snap, isolated, node_tol, boundary=None):
             continue
         near = sorted((p.distance(lines[int(j)].geom), int(j))
                       for j in ltree.query(p.buffer(search)) if int(j) != i)
-        if near and near[0][0] <= node_tol:
+        if (near and near[0][0] <= node_tol) or lands_on_own_body(
+                lines[i].geom, a % 2 == 0, node_tol):
             counts["joined"] += 1
             continue
         key = lines[i].key
@@ -666,12 +722,17 @@ def classify_dangles(lines, snap, isolated, node_tol, boundary=None):
             outside = not boundary.covers(p)
             if outside or edge.distance(p) <= snap:
                 counts["boundary"] += 1
+                why = ("end lies outside the boundary layer, so it leaves "
+                       "the area" if outside else
+                       "end lies within %.4g m of the boundary edge, so it "
+                       "is taken to leave the area" % snap)
+                if near and near[0][0] <= snap:
+                    why += ("; street '%s' is %.2f m away, so this may be a "
+                            "gap that the boundary hides"
+                            % (lines[near[0][1]].key, near[0][0]))
                 findings.append(Finding(
                     "snapgap", SUPPRESSED, "boundary", key, "", None, p.x, p.y,
-                    "end lies outside the boundary layer, so it leaves the "
-                    "area" if outside else
-                    "end lies within %.4g m of the boundary edge, so it is "
-                    "taken to leave the area" % snap))
+                    why))
                 continue
         if near and near[0][0] <= search:
             d, j = near[0]
@@ -813,6 +874,16 @@ class _Harness(object):
             self.failed.append(label)
             print("FAIL  %s" % label)
 
+    def meta(self, cond, label):
+        """Check the harness itself without calling check(), so a check()
+        that always passes cannot vouch for itself."""
+        if cond:
+            self.passed += 1
+            print("PASS  %s" % label)
+        else:
+            self.failed.append(label)
+            print("FAIL  %s" % label)
+
     def raises(self, fn, exc, label):
         try:
             fn()
@@ -852,6 +923,7 @@ def _self_test(tmp):
     h = _Harness()
     check, raises = h.check, h.raises
     box = shapely.box
+    meta = h.meta
 
     def feats_of(pairs):
         return [Feat(i, k, g) for i, (k, g) in enumerate(pairs)]
@@ -1184,6 +1256,22 @@ def _self_test(tmp):
     c = classify([("A", [(-50, 0), (50, 0)]), ("B", [(0, 0.05), (0, 100)])])[1]["counts"]
     check(c["joined"] == 1 and c["fallout"] == 0,
           "an end exactly one node tolerance from another street's body is joined  <-- pinned defect")
+    out, _ = classify([("A", [(0, 0), (-100, 0)]), ("B", [(0.04, 0.04), (100, 100)])])
+    check(getattr(at(out, 0, 0), "cls", None) == "fallout"
+          and getattr(at(out, 0.04, 0.04), "cls", None) == "fallout",
+          "two ends in each other's bounding box but 0.057 m apart are two nodes, not one  <-- pinned defect")
+    out, info = classify([("L", [(0, 0), (50, 0), (50, 20), (70, 20), (70, 0), (50, 0)]),
+                          ("K", [(50, -4), (200, -4)])])
+    check(at(out, 50, 0) is None and info["counts"]["joined"] == 1
+          and getattr(at(out, 50, -4), "cls", None) == "fallout",
+          "an end that lands on its own line's body is joined, so a lollipop is not fallout against its neighbour  <-- pinned defect")
+    out, info = classify([("L", [(50, 0), (70, 0), (70, 20), (50, 20), (50, -10)])])
+    check(at(out, 50, 0) is None and info["counts"]["joined"] == 1
+          and getattr(at(out, 50, -10), "cls", None) == "isolated",
+          "a start that lands on its own line's body is joined as an end is  <-- pinned defect")
+    out, info = classify([("D", [(0, 0), (0.01, 0), (100, 0)])])
+    check(info["counts"]["joined"] == 0 and info["counts"]["isolated"] == 2,
+          "a repeated first vertex does not make the start land on its own body  <-- pinned defect")
     out, _ = classify([("A", [(0, 0), (100, 0)]), ("B", [(50, 9), (50, 60)])])
     check(at(out, 50, 9).cls == "fallout" and at(out, 50, 9).status == REPORTED,
           "an end exactly on the snap tolerance is fallout  <-- pinned defect")
@@ -1208,6 +1296,9 @@ def _self_test(tmp):
           "an end inside the boundary layer but within the snap tolerance of its edge is suppressed")
     check(at(out, 500, 20).cls == "boundary",
           "boundary suppression wins over fallout for an end that is near both")
+    check("street 'W' is 5.00 m away" in getattr(at(out, 500, 20), "detail", "")
+          and "street" not in at(out, 500, 1100).detail.replace("street ends", ""),
+          "a suppressed end with a street inside the snap tolerance names that street, so the hidden gap is visible  <-- pinned defect")
     check(at(out, 800, 505).cls == "fallout" and at(out, 800, 505).status == REPORTED,
           "an interior fallout is not touched by the boundary layer")
     check(at(out, 300, 500).cls == "isolated" and info["counts"]["boundary"] == 5,
@@ -1290,6 +1381,10 @@ def _self_test(tmp):
     check(aou_verdict(anti, (175.0, 5.0, -175.0, 6.0), 1.0) == (None, None)
           and aou_verdict(anti, (175.0, 5.0, 0.0, 6.0), 1.0)[0] is not None,
           "data that only partly falls in an antimeridian area of use is refused  <-- pinned defect")
+    check(aou_verdict(anti, (169.5, 5.0, -169.5, 6.0), 1.0) == (None, None)
+          and aou_verdict(anti, (168.5, 5.0, -175.0, 6.0), 1.0)[0] is not None
+          and aou_verdict(anti, (175.0, 5.0, -168.5, 6.0), 1.0)[0] is not None,
+          "an antimeridian area of use grows by the margin on both of its sides  <-- pinned defect")
     check(prove_reprojection(True, 0.0174532925, (-82.0, 29.0), (-81.0, 28.0),
                              (400.0, 20.0), (401.0, 21.0))[0] is True
           and prove_reprojection(True, 0.0174532925, (-82.0, 29.0), (-81.0, 28.0),
@@ -1367,9 +1462,43 @@ def _self_test(tmp):
         why = str(exc)
     check("scale ratio is 0.8" in why and "Web Mercator" in why and "Reproject it" in why,
           "correctly tagged Web Mercator is refused with a message that names its scale, not only 're-tagged'  <-- pinned defect")
+    upright = [Feat(0, "L", shapely.LineString([(ft[0][0], ft[0][1]), (ft[0][0], ft[0][1] + 500.0),
+                                                (ft[0][0], ft[0][1] + 1000.0)]))]
+    got, note = convert_layer(upright, f2237, work, "upright")
+    check("scale ratio" in note,
+          "the scale proof uses the vertex farthest away in both axes, so a street that runs due north still passes  <-- pinned defect")
     unknown = dict(f2237, aou=None)
     got, note = convert_layer(line_ft, unknown, work, "noaou")
     check("unchecked" in note, "a CRS with no area of use still reprojects and notes the unchecked tag")
+    line_geo = [Feat(0, "L", shapely.LineString(geo))]
+    got, note = convert_layer(line_geo, f4269, work, "deg")
+    check("scale ratio 0.9997" in note and "geodesic distance" in note,
+          "a layer in degrees is proved by its scale against the geodesic distance  <-- pinned defect")
+    why = ""
+    try:
+        convert_layer(line_geo, f4269, crs_facts(3857), "geo-to-merc")
+    except Refusal as exc:
+        why = str(exc)
+    check("scale ratio is 1.1" in why and "Web Mercator" in why and "Name a projected CRS" in why,
+          "degrees reprojected to Web Mercator are refused, where a 0.9 sq m overlap measured 1.19 sq m  <-- pinned defect")
+    why = ""
+    try:
+        convert_layer(line_geo, f4269, crs_facts(26910), "geo-to-far-zone")
+    except Refusal as exc:
+        why = str(exc)
+    check("area of use of the work CRS EPSG:26910" in why and "Name a work CRS that covers the data" in why
+          and "tag is probably wrong" not in why,
+          "a work CRS whose area of use does not hold the data is refused with its own message  <-- pinned defect")
+    ok, why = prove_reprojection(True, 0.0174532925, (-82.0, 29.0), (-81.0, 28.0),
+                                 (400000.0, 3200000.0), (500000.0, 3100000.0), 0.0)
+    check(not ok and "cannot be proved" in why,
+          "a geographic layer at one location cannot prove its scale and is refused")
+    ok, why = prove_reprojection(True, 0.0174532925, (-82.0, 29.0), (-81.0, 28.0),
+                                 (400000.0, 3200000.0), (500000.0, 3100000.0), 141421.0)
+    check(ok, "a geographic layer whose output distance matches the geodesic distance passes")
+    ok, why = prove_reprojection(True, 0.0174532925, (-82.0, 29.0), (-81.0, 28.0),
+                                 (400000.0, 3200000.0), (500000.0, 3100000.0), 140000.0)
+    check(not ok, "a geographic layer whose output distance is 1 percent off the geodesic distance is refused")
 
     # ---- reading GeoJSON
     def named(n):
@@ -1503,7 +1632,8 @@ def _self_test(tmp):
     with io.open(junk, "w", encoding="utf-8") as fh:
         fh.write("{not json")
     code, out, err = run(["--polygons", junk, "--polygons-epsg", "26917"] + base)
-    check(code == 2 and out == "", "a file that is not JSON exits 2")
+    check(code == 2 and out == "" and "junk.geojson: Expecting" in err,
+          "a file that is not JSON exits 2 and the message names the file  <-- pinned defect")
     emptyfc = write_json("empty.geojson", [])
     code, out, err = run(["--polygons", emptyfc, "--polygons-epsg", "26917"] + base)
     check(code == 4 and out == "" and "nothing was compared" in err,
@@ -1519,6 +1649,14 @@ def _self_test(tmp):
     code, out, err = run(["--polygons", clean, "--polygons-epsg", "2237"] + base)
     check(code == 3 and out == "" and "area of use" in err,
           "an input tagged with the wrong EPSG is refused before anything is measured  <-- pinned defect")
+    ll = write_json("ll.geojson", [pfeat("A", box(-82.0, 29.0, -81.999, 29.001)),
+                                   pfeat("B", box(-81.9995, 29.0, -81.998, 29.001))])
+    code, out, err = run(["--polygons", ll, "--polygons-epsg", "4326"] + base)
+    check(code == 1 and "scale ratio 0.9997" in out and "geodesic" in out,
+          "degree polygons are measured in the work CRS once its scale is proved")
+    code, out, err = run(["--polygons", ll, "--polygons-epsg", "4326", "--work-epsg", "3857"])
+    check(code == 3 and out == "" and "Web Mercator" in err,
+          "degree polygons are refused under Web Mercator and nothing is printed  <-- pinned defect")
     code, out, err = run(["--polygons", clean, "--polygons-epsg", "999999"] + base)
     check(code == 3 and "not a code PROJ knows" in err, "an unknown EPSG for an input is refused")
     code, out, err = run(["--polygons", clean, "--polygons-epsg", "26917",
@@ -1815,17 +1953,24 @@ def _self_test(tmp):
         inner.raises(lambda: 1 // 0, ValueError, "wrong error")
         inner.raises(lambda: int("x"), ValueError, "the right error")
         status = inner.footer()
-    check(status == 1 and len(inner.failed) == 3 and inner.passed == 1,
-          "check() and raises() really do record a failure  <-- pinned defect")
-    check("4 assertions, 3 failed" in quiet.getvalue() and "FAILED: no error" in quiet.getvalue(),
-          "the footer reports failures by count and by name  <-- pinned defect")
+    meta(status == 1 and len(inner.failed) == 3 and inner.passed == 1,
+         "check() and raises() really do record a failure  <-- pinned defect")
+    meta("4 assertions, 3 failed" in quiet.getvalue() and "FAILED: no error" in quiet.getvalue(),
+         "the footer reports failures by count and by name  <-- pinned defect")
+    probe = _Harness()
+    with contextlib.redirect_stdout(io.StringIO()):
+        probe.meta(False, "broken")
+        probe.meta(True, "fine")
+    meta(probe.failed == ["broken"] and probe.passed == 1,
+         "the harness check that bypasses check() records a failure and a pass  <-- pinned defect")
     quiet = io.StringIO()
     with contextlib.redirect_stdout(quiet):
         status = _Harness().footer()
     check(status == 0 and "0 assertions, 0 failed" in quiet.getvalue(),
           "an empty run reports zero failures and exits 0")
 
-    return h.footer()
+    status = h.footer()
+    return 1 if h.failed else status
 
 
 
