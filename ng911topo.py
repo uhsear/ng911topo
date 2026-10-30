@@ -35,7 +35,8 @@ Nothing is written without --apply.
 Exit codes: 0 something was compared and no gate failed, 1 a gate failed
 (an overlap, a gap or a street end that stops short), 2 a file could not be
 read or written, 3 the run was refused (a CRS, a geometry or the boundary
-layer cannot be trusted), 4 nothing was compared, 64 usage error, 69 shapely
+layer cannot be trusted), 4 nothing was compared or a named layer held no
+features, 64 usage error, 69 shapely
 or pyproj is missing, 70 an unexpected crash, which is never a finding.
 """
 
@@ -315,15 +316,15 @@ def prove_reprojection(src_geographic, factor, a_src, b_src, a_out, b_out):
     if abs(ratio - 1.0) <= PROOF_TOL:
         return True, "scale ratio %.5f against the unit of the input" % ratio
     return False, ("the scale ratio is %.5f where the unit of the input says "
-                   "1; the layer was re-tagged, not reprojected" % ratio)
+                   "1; the layer was re-tagged, not reprojected, or its CRS "
+                   "is not metre-scale at this latitude (Web Mercator, "
+                   "EPSG:3857, is not). Reproject it to a local projected "
+                   "CRS first" % ratio)
 
 
 def convert_layer(feats, src, work, label, margin=AOU_MARGIN_DEG):
     """Reproject feats from src to work and prove it happened. Returns
     (feats, note). Raises Refusal when the tag or the transform is wrong."""
-    if src["epsg"] == work["epsg"]:
-        return feats, ("%s: EPSG:%d is the work CRS, not transformed"
-                       % (label, src["epsg"]))
     geoms = [f.geom for f in feats]
     xmin, ymin, xmax, ymax = [float(v) for v in shapely.total_bounds(geoms)]
     to_ll = pyproj.Transformer.from_crs(src["epsg"], 4326, always_xy=True)
@@ -333,6 +334,10 @@ def convert_layer(feats, src, work, label, margin=AOU_MARGIN_DEG):
         src["aou"], (min(lons), min(lats), max(lons), max(lats)), margin)
     if problem:
         raise Refusal("%s: %s" % (label, problem))
+    if src["epsg"] == work["epsg"]:
+        note = ("%s: EPSG:%d is the work CRS, not transformed"
+                % (label, src["epsg"]))
+        return feats, note + ("; " + aou_note if aou_note else "")
     tr = pyproj.Transformer.from_crs(src["epsg"], work["epsg"], always_xy=True)
     out = [shapely.ops.transform(tr.transform, g) for g in geoms]
     before = shapely.get_coordinates(geoms).tolist()
@@ -495,9 +500,9 @@ def find_overlaps(feats, tol, eps=CLIP_EPS, clip=None):
             pt = geoms[i].intersection(geoms[j]).representative_point()
             if a.key == b.key:
                 cls = "same-key"
-                detail = ("two rows of '%s' overlap by %.4f sq m: one area "
-                          "digitized twice, not two areas claiming one piece "
-                          "of ground" % (a.key, area))
+                detail = ("two rows of '%s' overlap by %.4f sq m: usually one "
+                          "area digitized twice, but two areas that share a "
+                          "key look the same" % (a.key, area))
             else:
                 cls = "overlap"
                 detail = ("'%s' overlaps '%s' by %.4f sq m"
@@ -510,16 +515,6 @@ def find_overlaps(feats, tol, eps=CLIP_EPS, clip=None):
 
 # -------------------------------------------------------------------- gaps
 
-def own_rings(feats):
-    """(feature index, polygon) for every hole drawn into a single polygon."""
-    out = []
-    for f in feats:
-        for poly in shapely.get_parts(f.geom):
-            for ring in poly.interiors:
-                out.append((f.index, shapely.Polygon(ring)))
-    return out
-
-
 def areal_parts(geom):
     """The parts of geom that have area. A difference can come back empty or
     carry a stray line, and neither is a piece of uncovered ground."""
@@ -530,12 +525,13 @@ def find_gaps(feats, tol, min_width, mult=ENCLAVE_SUSPECT_MULT):
     """Holes in the dissolved coverage. Returns (findings, info).
 
     Two gates run in turn: area, then mean width. A hole drawn into one
-    polygon is an enclave and passes. A wide hole ringed by several polygons
-    is a suspect enclave and fails, because only the first can be proved."""
+    polygon, and bordered by no other, is an enclave and passes. A wide hole
+    ringed by several polygons is a suspect enclave and fails, because only
+    the first can be proved. A polygon set into another's hole leaves a ring
+    that both border, so that ring is a gap."""
     geoms = [f.geom for f in feats]
     merged = shapely.unary_union(geoms)
     tree = shapely.STRtree(geoms)
-    rings = own_rings(feats)
     pieces = []
     for poly in shapely.get_parts(merged):
         for ring in poly.interiors:
@@ -560,19 +556,16 @@ def find_gaps(feats, tol, min_width, mult=ENCLAVE_SUSPECT_MULT):
             "width gate" % (area, width, min_width))
     wide_at = mult * max(min_width, DEFAULT_MIN_GAP_WIDTH)
     for width, (p, area) in by_width.kept:
-        rp = p.representative_point()
-        owner = next((k for k, ring in rings
-                      if ring.contains(rp) and geoms[k].distance(p) <= BORDER_PAD),
-                     None)
+        touching = set(int(k) for k in tree.query(p.buffer(BORDER_PAD))
+                       if geoms[int(k)].distance(p) <= BORDER_PAD)
+        owner = next(iter(touching)) if len(touching) == 1 else None
         shape = "%.4f sq m, mean width %.4f m" % (area, width)
         if owner is not None:
             add(INFO, "enclave", feats[owner].key, "", p,
                 "%s: a hole drawn into '%s' itself, not ground left between "
                 "polygons" % (shape, feats[owner].key))
             continue
-        near = sorted(set(feats[int(k)].key
-                          for k in tree.query(p.buffer(BORDER_PAD))
-                          if geoms[int(k)].distance(p) <= BORDER_PAD))
+        near = sorted(set(feats[k].key for k in touching))
         listed = ", ".join("'%s'" % k for k in near[:4])
         if len(near) > 4:
             listed += " and %d more" % (len(near) - 4)
@@ -669,14 +662,17 @@ def classify_dangles(lines, snap, isolated, node_tol, boundary=None):
             counts["joined"] += 1
             continue
         key = lines[i].key
-        if boundary is not None and (not boundary.covers(p)
-                                     or edge.distance(p) <= snap):
-            counts["boundary"] += 1
-            findings.append(Finding(
-                "snapgap", SUPPRESSED, "boundary", key, "", None, p.x, p.y,
-                "end on or beyond the boundary layer, so it leaves the "
-                "area legitimately"))
-            continue
+        if boundary is not None:
+            outside = not boundary.covers(p)
+            if outside or edge.distance(p) <= snap:
+                counts["boundary"] += 1
+                findings.append(Finding(
+                    "snapgap", SUPPRESSED, "boundary", key, "", None, p.x, p.y,
+                    "end lies outside the boundary layer, so it leaves the "
+                    "area" if outside else
+                    "end lies within %.4g m of the boundary edge, so it is "
+                    "taken to leave the area" % snap))
+                continue
         if near and near[0][0] <= search:
             d, j = near[0]
             other = lines[j].key
@@ -989,8 +985,8 @@ def _self_test(tmp):
           and abs(info["gate"].largest_dropped - 0.5) < 1e-6,
           "the gate reports the case just above the threshold and the largest it dropped  <-- pinned defect")
     same = [f for f in rep if f.cls == "same-key"][0]
-    check("digitized twice" in same.detail,
-          "two rows of one area are named as one area digitized twice, not a tool bug")
+    check("digitized twice" in same.detail and "share a key" in same.detail,
+          "two rows of one key are named as probably one area digitized twice, with the other cause stated  <-- pinned defect")
     first = [f for f in rep if f.key == "A"][0]
     check(5.0 <= first.x <= 10.0 and 0.0 <= first.y <= 10.0,
           "a finding sits inside the overlap so an analyst can zoom to it")
@@ -1000,6 +996,22 @@ def _self_test(tmp):
                                    ("B", box(5, 0, 15, 10))]), 50.0)[0]
     check(len(over) == 1 and over[0].status == SUPPRESSED,
           "an overlap exactly at the threshold is suppressed")
+    check(pair_area(ab[0], ab[1], 50.0, 0.0) == (50.0, True)
+          and pair_area(ab[0], ab[1], 49.0, 0.0) == (50.0, False),
+          "an area exactly eps from the threshold is measured again, and one beyond it is not  <-- pinned defect")
+    check(info["remeasured"] == 0
+          and find_overlaps(feats_of([("A", box(0, 0, 10, 10)), ("B", box(5, 0, 15, 10))]),
+                            50.0)[1]["remeasured"] == 1
+          and find_overlaps(feats_of([("A", box(0, 0, 10, 10)), ("B", box(9.895, 0, 20, 10))]),
+                            1.0)[1]["remeasured"] == 0,
+          "the count of pairs measured again is counted, and a pair 0.05 sq m from the threshold is not one  <-- pinned defect")
+    ladder = find_overlaps(feats_of([
+        ("a", box(0, 0, 10, 10)), ("b", box(8, 0, 18, 10)),
+        ("c", box(100, 0, 110, 10)), ("d", box(102, 0, 112, 10)),
+        ("e", box(200, 0, 210, 10)), ("f", box(205, 0, 215, 10)),
+        ("g", box(300, 0, 310, 10)), ("h", box(309.95, 0, 320, 10))]), 1.0)[0]
+    check([round(f.value, 1) for f in ladder] == [80.0, 50.0, 20.0, 0.5],
+          "findings list the largest overlap first, then the suppressed ones  <-- pinned defect")
 
     # ---- gaps: one fixture per outcome
     mixed = shapely.GeometryCollection([shapely.LineString([(0, 0), (5, 5)]),
@@ -1026,19 +1038,20 @@ def _self_test(tmp):
     check(sorted(by_cls) == ["below-area", "enclave", "gap", "narrow",
                              "suspect-enclave"] and ginfo["holes"] == 6,
           "six holes land in five classes: gap, suspect enclave, enclave, narrow and below the area gate")
-    gap = by_cls["gap"][0]
+    gap = [f for f in by_cls["gap"] if f.key == "gB"][0]
     check(gap.status == REPORTED and abs(gap.value - 40.0) < 1e-6
           and gap.key == "gB" and gap.other == "'gB', 'gL', 'gR', 'gT'",
           "a real gap is reported with its area and every polygon that borders it")
     sus = by_cls["suspect-enclave"][0]
     check(sus.status == REPORTED and "Verify" in sus.detail,
           "a wide hole ringed by several polygons is a suspect enclave and fails the gate")
-    check(all(f.status == INFO and f.key in ("E", "N") for f in by_cls["enclave"])
-          and len(by_cls["enclave"]) == 2,
-          "a hole drawn into one polygon is an enclave and passes the gate")
-    nested = [f for f in by_cls["enclave"] if f.key == "N"][0]
-    check(abs(nested.value - 96.0) < 1e-6,
-          "a polygon nested in a hole is not counted as uncovered ground  <-- pinned defect")
+    check(len(by_cls["enclave"]) == 1 and by_cls["enclave"][0].key == "E"
+          and by_cls["enclave"][0].status == INFO,
+          "a hole drawn into one polygon and bordered by no other is an enclave and passes the gate")
+    nested = [f for f in by_cls["suspect-enclave"] if f.key == "N"][0]
+    check(abs(nested.value - 96.0) < 1e-6 and nested.status == REPORTED
+          and nested.other == "'N', 'n'",
+          "a polygon nested in a hole is not counted as uncovered ground, and the ring left around it is reported, not passed as an enclave  <-- pinned defect")
     check(by_cls["narrow"][0].status == SUPPRESSED
           and by_cls["below-area"][0].status == SUPPRESSED,
           "a crack and a speck are kept as suppressed findings, not lost  <-- pinned defect")
@@ -1069,6 +1082,39 @@ def _self_test(tmp):
         ("far", box(500, 500, 510, 510))]), 1.0, 0.15)[0]
     check(lone[0].cls == "enclave" and lone[0].other == "",
           "a hole in one polygon is an enclave even when other polygons exist elsewhere")
+    donut = shapely.Polygon(box(0, 0, 60, 60).exterior.coords,
+                            [box(10, 10, 50, 50).exterior.coords])
+    short = find_gaps(feats_of([("A", donut), ("B", box(11, 11, 49, 49))]), 1.0, 0.15)[0]
+    check(len(short) == 1 and short[0].cls == "gap" and short[0].status == REPORTED
+          and short[0].other == "'A', 'B'" and abs(short[0].value - 156.0) < 1e-6,
+          "a polygon set into a hole with a 1 m margin leaves a gap, not a deliberate enclave  <-- pinned defect")
+    half = find_gaps(feats_of([("A", donut), ("B", box(10, 10, 30, 50))]), 1.0, 0.15)[0]
+    check(len(half) == 1 and half[0].cls == "suspect-enclave" and half[0].status == REPORTED
+          and abs(half[0].value - 800.0) < 1e-6,
+          "a polygon that fills half of another's hole leaves a wide area that is reported  <-- pinned defect")
+    fits = find_gaps(feats_of([("A", donut), ("B", box(10, 10, 50, 50))]), 1.0, 0.15)
+    check(fits[0] == [] and fits[1]["holes"] == 0,
+          "a polygon that fills another's hole exactly leaves nothing to report")
+    vals = [f.value for f in gfound if f.status == REPORTED]
+    check(len(vals) == 3 and vals == sorted(vals, reverse=True) and abs(vals[0] - 100.0) < 1e-6,
+          "reported gaps list the largest first  <-- pinned defect")
+    speck = find_gaps(feats_of(frame("q", 10, 1.5, 0.5)), 1.0, 0.15)[0]
+    check(len(speck) == 1 and speck[0].cls == "below-area",
+          "a hole of 0.75 sq m is under a 1 sq m area gate")
+    edge_w = find_gaps(feats_of(frame("e", 10, 6, 6)), 1.0, 0.15)[0]
+    check(len(edge_w) == 1 and edge_w[0].cls == "gap" and abs(edge_w[0].value - 36.0) < 1e-6,
+          "a hole whose mean width is exactly 20 times the width gate is a gap, not a suspect enclave")
+    ringed5 = find_gaps(feats_of(frame("r", 10, 10, 10)[:3] + [
+        ("rT1", box(10, 10, 15, 20)), ("rT2", box(15, 10, 20, 20))]), 1.0, 0.15)[0]
+    check(len(ringed5) == 1 and ringed5[0].other == "'rB', 'rL', 'rR', 'rT1' and 1 more",
+          "a hole ringed by five polygons names four and counts one more  <-- pinned defect")
+    twins = find_gaps(feats_of([(u"Z", b) for _, b in frame("r", 10, 10, 10)]), 1.0, 0.15)[0]
+    check(len(twins) == 1 and twins[0].cls == "gap" and twins[0].other == "'Z'",
+          "a wide hole ringed by rows that all share one key is a gap, since only one area can be named")
+    walled = shapely.Polygon(box(0, 0, 30, 30).exterior.coords, [box(2, 2, 20, 20).exterior.coords])
+    away = find_gaps(feats_of([("A", walled), ("Z", box(-10, 0, 0, 30))]), 1.0, 0.15)[0]
+    check(len(away) == 1 and away[0].cls == "enclave" and away[0].status == INFO,
+          "a polygon 2 m from a hole does not border it, so the hole is still an enclave  <-- pinned defect")
 
     # ---- snapgap: dangles
     def classify(pairs, snap=9.0, isolated=9.0, node=0.05, boundary=None):
@@ -1131,6 +1177,25 @@ def _self_test(tmp):
           and at(classify(pair20, snap=10.0)[0], 100, 0).cls == "isolated",
           "the snap tolerance moves a 20 m gap between fallout and isolated")
 
+    # ---- snapgap: a value exactly on a tolerance
+    c = classify([("A", [(0, 0), (0, 100)]), ("B", [(0.05, 0), (0.05, -100)])])[1]["counts"]
+    check(c["shared"] == 2 and c["joined"] == 0,
+          "two ends exactly one node tolerance apart are one node  <-- pinned defect")
+    c = classify([("A", [(-50, 0), (50, 0)]), ("B", [(0, 0.05), (0, 100)])])[1]["counts"]
+    check(c["joined"] == 1 and c["fallout"] == 0,
+          "an end exactly one node tolerance from another street's body is joined  <-- pinned defect")
+    out, _ = classify([("A", [(0, 0), (100, 0)]), ("B", [(50, 9), (50, 60)])])
+    check(at(out, 50, 9).cls == "fallout" and at(out, 50, 9).status == REPORTED,
+          "an end exactly on the snap tolerance is fallout  <-- pinned defect")
+    out, _ = classify([("A", [(0, 0), (100, 0)]), ("B", [(50, 20), (50, 60)])],
+                      snap=9.0, isolated=20.0)
+    check(at(out, 50, 20).cls == "isolated" and at(out, 50, 20).other == "A",
+          "an end exactly at the search radius is isolated and still names its nearest street  <-- pinned defect")
+    out, _ = classify([("T", [(0, 0), (1000, 0)]), ("S1", [(100, 7), (100, 50)]),
+                       ("S2", [(200, 3), (200, 50)]), ("S3", [(300, 5), (300, 50)])])
+    check([f.value for f in out if f.status == REPORTED] == [3.0, 5.0, 7.0],
+          "fallout lists the nearest stop first  <-- pinned defect")
+
     # ---- snapgap: the boundary layer
     county = box(0, 0, 1000, 1000)
     bl = [("O", [(500, 500), (500, 1100)]), ("E", [(700, 10), (700, 300)]),
@@ -1147,9 +1212,16 @@ def _self_test(tmp):
           "an interior fallout is not touched by the boundary layer")
     check(at(out, 300, 500).cls == "isolated" and info["counts"]["boundary"] == 5,
           "an interior dead end stays isolated with a boundary layer present")
+    check("lies outside the boundary layer" in at(out, 500, 1100).detail
+          and "within 30 m of the boundary edge" in at(out, 700, 10).detail,
+          "a suppressed end says whether it lies outside the boundary or only near its edge  <-- pinned defect")
     out, _ = classify(bl, snap=30.0, isolated=30.0)
     check(at(out, 500, 1100).cls == "isolated" and at(out, 700, 10).cls == "isolated",
           "without a boundary layer the same ends are listed as dead ends")
+    out, _ = classify([("P", [(500, 30), (500, 400)]), ("Q", [(600, 31), (600, 400)])],
+                      snap=30.0, isolated=30.0, boundary=county)
+    check(at(out, 500, 30).cls == "boundary" and at(out, 600, 31).cls == "isolated",
+          "an end exactly one snap tolerance from the boundary edge is suppressed, and one 1 m further in is not  <-- pinned defect")
 
     # ---- the boundary layer is refused, not silently dropped
     ends = endpoints_of(feats_of([(k, shapely.LineString(c)) for k, c in bl]))
@@ -1166,6 +1238,17 @@ def _self_test(tmp):
     check(vet_boundary(shapely.Polygon(), ends, 30.0, 0.5)
           == ["the boundary layer has no area"],
           "an empty boundary layer is refused")
+    check(vet_boundary(shapely.LineString([(0, 0), (1, 0)]), ends, 30.0, 0.5)
+          == ["the boundary layer has no area"],
+          "a boundary layer with no area is refused")
+    vends = endpoints_of(feats_of([
+        ("p", shapely.LineString([(50, 50), (60, 50)])),
+        ("q", shapely.LineString([(105, 50), (110, 50)]))]))
+    sq = box(0, 0, 100, 100)
+    check(vet_boundary(sq, vends, 9.0, 0.75) == []
+          and len(vet_boundary(sq, vends, 0.0, 0.75)) == 1
+          and len(vet_boundary(sq, vends, 9.0, 0.76)) == 1,
+          "street ends within the snap tolerance of the boundary count as inside it, and a share exactly at the minimum passes  <-- pinned defect")
 
     # ---- the CRS: facts, work CRS, area of use, and the reprojection proof
     f26917, f2237, f4269 = crs_facts(26917), crs_facts(2237), crs_facts(4269)
@@ -1194,6 +1277,26 @@ def _self_test(tmp):
           "a nan extent is refused, not passed  <-- pinned defect")
     check(aou_verdict(None, inside, 0.1)[1] is not None,
           "a CRS with no area of use is passed but says the tag is unchecked")
+    box_aou = (10.0, 20.0, 30.0, 40.0)
+    check(aou_verdict(box_aou, (9.0, 19.0, 31.0, 41.0), 1.0) == (None, None),
+          "data exactly one margin outside the area of use on every side still passes  <-- pinned defect")
+    check(all(aou_verdict(box_aou, b, 1.0)[0] is not None
+              for b in ((8.9, 20.0, 30.0, 40.0), (10.0, 20.0, 31.1, 40.0),
+                        (10.0, 18.9, 30.0, 40.0), (10.0, 20.0, 30.0, 41.1))),
+          "data beyond the margin on any one side is refused  <-- pinned defect")
+    check(aou_verdict((10.0, 0.0, 10.0, 40.0), (20.0, 5.0, 20.0, 6.0), 1.0)[0] is not None,
+          "an area of use with equal west and east is not read as crossing the antimeridian")
+    anti = (170.0, 0.0, -170.0, 80.0)
+    check(aou_verdict(anti, (175.0, 5.0, -175.0, 6.0), 1.0) == (None, None)
+          and aou_verdict(anti, (175.0, 5.0, 0.0, 6.0), 1.0)[0] is not None,
+          "data that only partly falls in an antimeridian area of use is refused  <-- pinned defect")
+    check(prove_reprojection(True, 0.0174532925, (-82.0, 29.0), (-81.0, 28.0),
+                             (400.0, 20.0), (401.0, 21.0))[0] is True
+          and prove_reprojection(True, 0.0174532925, (-82.0, 29.0), (-81.0, 28.0),
+                                 (400000.0, 5.0), (400100.0, 6.0))[0] is True
+          and prove_reprojection(True, 0.0174532925, (-82.0, 29.0), (-81.0, 28.0),
+                                 (-81.5, 28.0), (-81.0, 28.0))[0] is False,
+          "a geographic layer counts as reprojected once any output coordinate leaves the degree range  <-- pinned defect")
     ok, why = prove_reprojection(False, 0.3048006096, (0, 0), (1000, 0),
                                  (0, 0), (304.8, 0))
     check(ok and "scale ratio" in why, "a foot layer that became metres passes the scale proof")
@@ -1237,15 +1340,33 @@ def _self_test(tmp):
     check(all(abs(a[0] - b[0]) < 0.01 and abs(a[1] - b[1]) < 0.01
               for a, b in zip(back, utm)) and "degree-like" in note,
           "a layer in degrees is reprojected to the metre CRS and proved by its range")
-    got, note = convert_layer(line_ft, work, work, "same")
-    check(got is line_ft and "not transformed" in note,
+    line_utm = [Feat(0, "L", shapely.LineString(utm))]
+    got, note = convert_layer(line_utm, work, work, "same")
+    check(got is line_utm and "not transformed" in note and "unchecked" not in note,
           "a layer already in the work CRS is passed through and says so")
+    raises(lambda: convert_layer(line_ft, work, work, "feet-as-metres"), Refusal,
+           "feet tagged as the work CRS fall outside its area of use and are refused  <-- pinned defect")
+    deg_xy = [Feat(0, "L", shapely.LineString([(-82.0, 29.0), (-81.9, 29.1)]))]
+    raises(lambda: convert_layer(deg_xy, work, work, "degrees-as-metres"), Refusal,
+           "degrees tagged as the work CRS are refused instead of measured as metres  <-- pinned defect")
+    got, note = convert_layer(line_utm, dict(work, aou=None), work, "same-noaou")
+    check(got is line_utm and "unchecked" in note,
+          "a layer in the work CRS with no area of use passes and notes the unchecked tag")
     raises(lambda: convert_layer([Feat(0, "L", shapely.LineString(utm))], f2237,
                                  work, "mistagged"), Refusal,
            "metre coordinates tagged as feet fall outside that CRS's area of use and are refused  <-- pinned defect")
     liar = dict(f2237, factors=(1.0, 1.0))
     raises(lambda: convert_layer(line_ft, liar, work, "liar"), Refusal,
            "a layer claimed to be metres that is really feet fails the scale proof end to end  <-- pinned defect")
+    to_merc = pyproj.Transformer.from_crs(26917, 3857, always_xy=True)
+    merc = [Feat(0, "L", shapely.LineString([to_merc.transform(x, y) for x, y in utm]))]
+    why = ""
+    try:
+        convert_layer(merc, crs_facts(3857), work, "merc")
+    except Refusal as exc:
+        why = str(exc)
+    check("scale ratio is 0.8" in why and "Web Mercator" in why and "Reproject it" in why,
+          "correctly tagged Web Mercator is refused with a message that names its scale, not only 're-tagged'  <-- pinned defect")
     unknown = dict(f2237, aou=None)
     got, note = convert_layer(line_ft, unknown, work, "noaou")
     check("unchecked" in note, "a CRS with no area of use still reprojects and notes the unchecked tag")
@@ -1263,6 +1384,8 @@ def _self_test(tmp):
            "a crs member the tool cannot read is refused, not ignored")
     raises(lambda: declared_epsg({"crs": "EPSG:4326"}), Refusal,
            "a crs member that is not an object is refused")
+    raises(lambda: declared_epsg(named("EPSG:2237x")), Refusal,
+           "a crs name with text after the code is refused, not read as the code  <-- pinned defect")
     one = {"type": "Feature", "properties": {}, "geometry": None}
     check(raw_features(one, "p") == [one]
           and raw_features({"type": "FeatureCollection", "features": [one]}, "p") == [one],
@@ -1453,7 +1576,7 @@ def _self_test(tmp):
                           "--boundary-epsg", "26917"] + base)
     check(code == 2 and out == "" and "gone.geojson" in err and "dangling" in unguarded,
           "a boundary layer that cannot be read exits 2 and prints no findings, where the unguarded run printed them  <-- pinned defect")
-    wrong = write_json("wrong.geojson", [pfeat("C", box(BX + 900000, BY, BX + 901000, BY + 1000))])
+    wrong = write_json("wrong.geojson", [pfeat("C", box(BX + 300000, BY, BX + 301000, BY + 1000))])
     code, out, err = run(["--streets", flood, "--streets-epsg", "26917",
                           "--boundary", wrong, "--boundary-epsg", "26917"] + base)
     check(code == 3 and out == "" and "cannot be trusted" in err and "does not overlap" in err,
@@ -1480,6 +1603,82 @@ def _self_test(tmp):
                 "--streets-epsg", "26917"] + base)
     check(both[0] == 1 and "OVERLAPS" in both[1] and "SNAPGAP" in both[1],
           "polygons and streets can be checked in one run")
+    code, out, err = run(["--polygons", clean, "--polygons-epsg", "26917",
+                          "--streets", emptyfc, "--streets-epsg", "26917"] + base)
+    check(code == 4 and "OVERLAPS" in out and "SNAPGAP" not in out
+          and "--streets held no features" in err,
+          "an empty street layer beside good polygons exits 4 and names the layer, not a clean 0  <-- pinned defect")
+    code, out, err = run(["--polygons", nogeom, "--polygons-epsg", "26917",
+                          "--streets", streets, "--streets-epsg", "26917"] + base)
+    check(code == 4 and "SNAPGAP" in out and "OVERLAPS" not in out
+          and "--polygons held no features" in err,
+          "a polygon layer with no geometry beside good streets exits 4 and names the layer  <-- pinned defect")
+    code, out, err = run(["--polygons", nogeom, "--polygons-epsg", "26917",
+                          "--streets", emptyfc, "--streets-epsg", "26917"] + base)
+    check(code == 4 and out == "" and "nothing was compared" in err,
+          "two empty layers still exit 4 with the nothing-compared message")
+    deg_poly = write_json("deg_poly.geojson", [
+        pfeat("A", box(-82.0, 29.0, -81.9, 29.1)), pfeat("B", box(-81.95, 29.0, -81.85, 29.1))])
+    code, out, err = run(["--polygons", deg_poly, "--polygons-epsg", "26917"] + base)
+    check(code == 3 and out == "" and "area of use" in err,
+          "degrees tagged as the metre work CRS are refused, not measured as a 0.005 sq m overlap  <-- pinned defect")
+    precious = os.path.join(tmp, "precious.txt")
+    with io.open(precious, "w", encoding="utf-8") as fh:
+        fh.write(u"keep me")
+    code, out, err = run(["--polygons", areas, "--polygons-epsg", "26917",
+                          "--out", precious] + base)
+    with io.open(precious, "r", encoding="utf-8") as fh:
+        kept = fh.read()
+    code2, out2, err2 = run(["--polygons", areas, "--polygons-epsg", "26917",
+                             "--out", precious, "--apply"] + base)
+    with io.open(precious, "r", encoding="utf-8") as fh:
+        replaced = fh.read()
+    check(kept == "keep me" and replaced.startswith("check,status,class,key")
+          and code2 == 1,
+          "--out is refused only when it is an input; with --apply an existing file is overwritten  <-- pinned defect")
+
+    # ---- the report: how many findings are listed, and which bin is densest
+    three = [Finding("overlap", REPORTED, "overlap", "k%d" % n, "", 1.0, 0.0, 0.0, "d")
+             for n in range(3)]
+    shown = describe([("T", [], three)], [], 2)
+    check(sum(1 for t in shown if t.startswith("    k")) == 2
+          and shown[-1] == "    ... 1 more; --out lists them all",
+          "--sample caps the findings listed and says how many more there are  <-- pinned defect")
+    shown = describe([("T", [], three[:2])], [], 2)
+    check(sum(1 for t in shown if t.startswith("    k")) == 2
+          and not any("more" in t for t in shown),
+          "a group exactly the size of --sample lists everything and mentions nothing more")
+
+    def stubs_run(offsets, extra=()):
+        feats = [sline("T", [(0, 0), (1000, 0)])]
+        for n, d in enumerate(offsets):
+            feats.append(sline("S%d" % n, [(100 * (n + 1), d), (100 * (n + 1), 80)]))
+        return run(["--streets", write_json("stubs3.geojson", feats),
+                    "--streets-epsg", "26917"] + base + list(extra))
+
+    code, out, err = stubs_run((6.5, 7.0, 7.2))
+    check("6.0 -    8.0 m    3  ###  <-- densest" in out,
+          "a bin holding exactly three ends is marked densest  <-- pinned defect")
+    code, out, err = stubs_run((6.5, 7.0))
+    check("6.0 -    8.0 m    2  ##" in out and "densest" not in out,
+          "a bin holding two ends is not marked")
+    code, out, err = stubs_run((6.5, 7.0, 7.2, 10.5, 10.8, 11.0), ("--snap-tol", "12"))
+    marked = [t for t in out.splitlines() if "densest" in t]
+    check(len(marked) == 1 and "6.0 -" in marked[0],
+          "two equally dense bins mark the nearer one  <-- pinned defect")
+    code, out, err = stubs_run((6.5, 7.0, 7.2), ("--sample", "0"))
+    check(code == 1 and "REPORTED (3)" in out and "... 3 more" in out and "end stops" not in out,
+          "--sample 0 is accepted and lists no finding rows  <-- pinned defect")
+
+    # ---- a boundary layer is vetted with the snap tolerance
+    near_edge = write_json("near_edge.geojson", [
+        sline("S1", [(102, 0), (104, 5)]), sline("S2", [(101, 10), (103, 12)]),
+        sline("S3", [(50, 0), (60, 0)])])
+    bnd = write_json("bnd.geojson", [pfeat("C", sqp(0, -50, 100, 100))])
+    code, out, err = run(["--streets", near_edge, "--streets-epsg", "26917",
+                          "--boundary", bnd, "--boundary-epsg", "26917"] + base)
+    check(code == 0 and "SUPPRESSED (4)" in out and err == "",
+          "street ends a few metres outside the boundary count as inside it when the boundary is vetted  <-- pinned defect")
 
     # ---- usage errors
     pe = ["--polygons", clean, "--polygons-epsg", "26917"]
@@ -1506,6 +1705,24 @@ def _self_test(tmp):
               "usage error %r exits 64 and says so" % needle)
     code, out, err = run(["--help"])
     check(code == 0 and "--self-test" in out, "--help exits 0")
+
+    def accepted(extra):
+        return _usage_problem(_parse(pe + base + extra)) is None
+
+    check(accepted([]) and accepted(["--sample", "0"]) and accepted(["--min-boundary-cover", "1"])
+          and accepted(["--min-boundary-cover", "0"]) and accepted(["--min-gap-width", "0"]),
+          "the edges of each allowed range are accepted: --sample 0, a share of 0 or 1, a width gate of 0  <-- pinned defect")
+    check(not accepted(["--min-gap-width", "-1"]) and not accepted(["--snap-tol", "0.05"])
+          and not accepted(["--min-boundary-cover", "1.01"]) and not accepted(["--bin", "-1"]),
+          "a negative width gate, a snap tolerance equal to the node tolerance and a share over 1 are refused  <-- pinned defect")
+    dflt = _parse(pe + base)
+    check((dflt.overlap_tol, dflt.gap_tol, dflt.min_gap_width, dflt.snap_tol, dflt.node_tol,
+           dflt.min_boundary_cover, dflt.bin, dflt.sample, dflt.key_field,
+           dflt.street_key_field)
+          == (1.0, 1.0, 0.15, 9.0, 0.05, 0.5, 2.0, 10, "KEY", "SEGMENT_ID")
+          and (CLIP_EPS, MIN_CLUSTER, ENCLAVE_SUSPECT_MULT, BORDER_PAD, PROOF_TOL, AOU_MARGIN_DEG)
+          == (1e-6, 3, 20.0, 0.01, 0.005, 0.1),
+          "the default thresholds are the ones the README documents  <-- pinned defect")
 
     # ---- the tool opens no sockets and does not crash quietly
     real_connect = socket.socket.connect
@@ -1721,7 +1938,8 @@ def _usage_problem(args):
         for path in (args.polygons, args.streets, args.boundary):
             if path and os.path.normcase(os.path.realpath(path)) == \
                     os.path.normcase(os.path.realpath(args.out)):
-                return "--out %s is also an input layer. Name a new file." % path
+                return ("--out %s is also an input layer. Name a different "
+                        "file." % path)
     return None
 
 
@@ -1766,7 +1984,7 @@ def _run(argv):
         print("error: %s" % problem, file=sys.stderr)
         return EXIT_USAGE
     try:
-        sections, notes, compared = _analyse(args)
+        sections, notes, compared, empty = _analyse(args)
     except Refusal as exc:
         print("refused: %s" % exc, file=sys.stderr)
         return EXIT_REFUSED
@@ -1791,16 +2009,22 @@ def _run(argv):
         else:
             print("\nCheck only. %s was not written. Re-run with --apply."
                   % args.out)
+    if empty:
+        print("error: %s held no features, so its check did not run. The "
+              "report above covers only the other layer." % " and ".join(empty),
+              file=sys.stderr)
+        return EXIT_NOTHING
     return gate_exit(sections)
 
 
 def _analyse(args):
-    """Load, vet and check. Returns (sections, notes, features compared)."""
+    """Load, vet and check. Returns (sections, notes, features compared,
+    flags of the named layers that held no features)."""
     work = crs_facts(args.work_epsg)
     problem = work_crs_problem(work)
     if problem:
         raise Refusal(problem)
-    sections, notes, compared = [], [], 0
+    sections, notes, compared, empty = [], [], 0, []
     if args.polygons:
         feats, got = prepare_layer(args.polygons, args.polygons_epsg, work,
                                    args.polygons, "polygon", args.key_field)
@@ -1810,6 +2034,8 @@ def _analyse(args):
             sections.append(overlap_section(feats, args.overlap_tol))
             sections.append(gap_section(feats, args.gap_tol,
                                         args.min_gap_width))
+        else:
+            empty.append("--polygons")
     if args.streets:
         lines, got = prepare_layer(args.streets, args.streets_epsg, work,
                                    args.streets, "line",
@@ -1833,7 +2059,9 @@ def _analyse(args):
                               % (args.boundary, "; ".join(reasons)))
         if lines:
             sections.append(snap_section(lines, args, boundary))
-    return sections, notes, compared
+        else:
+            empty.append("--streets")
+    return sections, notes, compared, empty
 
 
 if __name__ == "__main__":
