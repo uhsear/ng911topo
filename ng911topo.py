@@ -365,6 +365,10 @@ def convert_layer(feats, src, work, label, margin=AOU_MARGIN_DEG):
     """Reproject feats from src to work and prove it happened. Returns
     (feats, note). Raises Refusal when the tag or the transform is wrong."""
     geoms = [f.geom for f in feats]
+    if not all(math.isfinite(v) for xy in shapely.get_coordinates(geoms).tolist()
+               for v in xy):
+        raise Refusal("%s: a coordinate is nan or infinite, so no distance "
+                      "from it can be trusted; repair the file" % label)
     xmin, ymin, xmax, ymax = [float(v) for v in shapely.total_bounds(geoms)]
     to_ll = pyproj.Transformer.from_crs(src["epsg"], 4326, always_xy=True)
     lons, lats = to_ll.transform([xmin, xmin, xmax, xmax],
@@ -1874,6 +1878,15 @@ def _self_test(tmp):
     code, out, err = run(["--polygons", deg_poly, "--polygons-epsg", "26917"] + base)
     check(code == 3 and out == "" and "area of use" in err,
           "degrees tagged as the metre work CRS are refused, not measured as a 0.005 sq m overlap  <-- pinned defect")
+    nan_st = write_json("nan_st.geojson", [lfeat("N1", [[BX, BY], [BX + 100, BY]]),
+                                           lfeat("N2", [[BX + 106, BY], [float("nan"), BY + 50]])])
+    code, out, err = run(["--streets", nan_st, "--streets-epsg", "26917"] + base)
+    check(code == 3 and out == "" and "nan or infinite" in err,
+          "a street with a nan coordinate is refused, not listed as a clean dead end with exit 0  <-- pinned defect")
+    inf_st = write_json("inf_st.geojson", [lfeat("I1", [[BX, BY], [float("inf"), BY + 50]])])
+    code, out, err = run(["--streets", inf_st, "--streets-epsg", "26917"] + base)
+    check(code == 3 and out == "" and "nan or infinite" in err,
+          "a street with an infinite coordinate is refused by the same check")
     precious = os.path.join(tmp, "precious.txt")
     with io.open(precious, "w", encoding="utf-8") as fh:
         fh.write(u"keep me")

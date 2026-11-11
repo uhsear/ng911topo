@@ -70,10 +70,10 @@ PASS  a full run opens no socket, and the guard would have caught one
 PASS  an unexpected exception exits 70, not the 1 that means a gate failed  <-- pinned defect
 ...
 --------------------------------------------------------------------
-267 assertions, 0 failed
+269 assertions, 0 failed
 ```
 
-The full run prints all 267 assertions. Each `...` line above is where this block is cut. The line
+The full run prints all 269 assertions. Each `...` line above is where this block is cut. The line
 that starts with `info:` is a measurement, not an assertion. It is explained in
 [The equivalence argument](#the-equivalence-argument-the-clip-and-the-re-measure).
 
@@ -107,9 +107,9 @@ Python 3.9 or newer, [shapely](https://shapely.readthedocs.io/) 2 or newer, and
 network, no database. The inputs are GeoJSON files, which
 every GIS can export.
 
-The self-test prints 267 assertions on every interpreter below, and each run ends with `267
+The self-test prints 269 assertions on every interpreter below, and each run ends with `269
 assertions, 0 failed`. `coverage run --branch ng911topo.py --self-test` reports 100 percent of
-1301 statements and 276 branches (run on the geo venv row). The count is the same on Windows and
+1311 statements and 278 branches (run on the geo venv row). The count is the same on Windows and
 Linux because the self-test needs shapely and pyproj on both and uses no `arcpy`.
 
 | Host | Python | shapely | pyproj |
@@ -682,13 +682,10 @@ keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as wr
 - A threshold given as `nan` or `inf`, such as `--overlap-tol nan`, is refused with exit 64 before
   any file is read, because every comparison with `nan` is false and the run would drop every case.
   A threshold of `0` is allowed.
-- A coordinate of `NaN` or `Infinity` in GeoJSON is not valid JSON, but Python reads it. `Infinity`
-  is refused with exit 3 by the area-of-use check. A `NaN` is not refused: a street with an end at
-  `(nan, y)` is listed as an INFO isolated dead end and the run exits 0, and a `NaN` in one
-  position of one street can also raise a shapely `RuntimeWarning`. A `NaN` coordinate
-  in any street also makes the nearest-street distance `NaN` for the ends near it, which can hide a
-  real street end that stops short, and the run still exits 0. GeoJSON from standard tools never
-  carries `NaN`.
+- A coordinate of `NaN` or `Infinity` in GeoJSON is not valid JSON, but Python reads it. Either one
+  is refused with exit 3 and a message that names the layer, before any distance is measured. A
+  `NaN` used to pass the area-of-use check and hide a real stub, so the run exited 0 on a case it
+  could not evaluate. GeoJSON from standard tools never carries `NaN`.
 - A GeoJSON file saved with a UTF-8 byte order mark exits 2 with `Unexpected UTF-8 BOM (decode
   using utf-8-sig)`. It is refused and never read as clean, but Windows tools write such files
   often. Save the file as UTF-8 without a BOM.
@@ -721,7 +718,7 @@ keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as wr
 - The formula guard covers the six leaders `=`, `+`, `-`, `@`, tab and carriage return. OWASP also
   lists a line feed and the full-width forms of `=`, `+`, `-` and `@`. A key that starts with one of
   those is written as it came. A key with spaces before a formula leader, such as ` =2+2`, is also
-  written as it came, because a spreadsheet does not treat it as a formula. OWASP also notes that its mitigations are not reliable in Excel after the file
+  written as it came. This tool assumes a spreadsheet does not treat it as a formula. That was not tried in a spreadsheet, and the OWASP page does not mention leading spaces. OWASP also notes that its mitigations are not reliable in Excel after the file
   is saved and opened again. The apostrophe shows in a viewer that does not treat it as a text marker,
   for example a text editor or a script that reads the CSV. A key that already starts with an
   apostrophe is not changed, so the guard cannot be undone exactly.
