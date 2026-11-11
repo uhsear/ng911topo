@@ -1,7 +1,7 @@
 # ng911topo
 
-Find response-area polygons that overlap, ground that no polygon covers, and street ends that stop
-short of another street. Every threshold is printed, together with what it suppressed and the
+Find response-area polygons that overlap, enclosed ground that no polygon covers, and street ends
+that stop short of another street. Every threshold is printed, together with what it suppressed and the
 nearest case just above it. The tool refuses to run when a boundary layer it was told to use
 cannot be trusted, instead of printing a flood of false findings.
 
@@ -27,6 +27,10 @@ them in different cells, and one node becomes two false dangles.
 This tool prints the gate, keeps the suppressed cases in its output, finds the nearest case above
 the gate, and exits 3 with no findings when the boundary layer is wrong.
 
+The gap check finds holes in the dissolved coverage. A strip that reaches the outer edge of the
+coverage is not a hole and is not found. The report says so on every run, so an exit 0 is not
+read as proof that no such strip exists.
+
 ```
 $ python ng911topo.py --self-test
 ng911topo self-test: temporary files only, no network
@@ -44,13 +48,11 @@ PASS  the gate reports the case just above the threshold and the largest it drop
 ...
 PASS  two ends 0.0002 m apart are one node, not two false dangles  <-- pinned defect
 ...
+PASS  an end that lands on its own line's body is joined, so a lollipop is not fallout against its neighbour  <-- pinned defect
+...
 PASS  a boundary layer in the wrong place or CRS is refused with both reasons  <-- pinned defect
 ...
 PASS  a geographic layer that still reads as degrees is caught as re-tagged  <-- pinned defect
-...
-PASS  degree polygons are refused under Web Mercator and nothing is printed  <-- pinned defect
-...
-PASS  an end that lands on its own line's body is joined, so a lollipop is not fallout against its neighbour  <-- pinned defect
 ...
 PASS  the key column gets one apostrophe before a tab and nothing else changes  <-- pinned defect
 ...
@@ -61,19 +63,22 @@ PASS  a real run over keys that start with = + - @ tab and CR writes each with o
 PASS  a prefix of the write flag is refused and nothing is written  <-- pinned defect
 PASS  the prefix --ap is refused by the parser  <-- pinned defect
 ...
-PASS  --overlap-tol nan exits 64 and prints no report, not a clean 0 with a real overlap hidden  <-- pinned defect
+PASS  degree polygons are refused under Web Mercator and nothing is printed  <-- pinned defect
+PASS  polygons tagged 3857 under work CRS 3857 are refused and nothing is printed, where a 0.76 sq m overlap read 1.0 and failed the gate  <-- pinned defect
 ...
 PASS  a boundary layer that cannot be read exits 2 and prints no findings, where the unguarded run printed them  <-- pinned defect
 PASS  a boundary layer in the wrong place is refused with no findings printed  <-- pinned defect
+...
+PASS  --overlap-tol nan exits 64 and prints no report, not a clean 0 with a real overlap hidden  <-- pinned defect
 ...
 PASS  a full run opens no socket, and the guard would have caught one
 PASS  an unexpected exception exits 70, not the 1 that means a gate failed  <-- pinned defect
 ...
 --------------------------------------------------------------------
-269 assertions, 0 failed
+278 assertions, 0 failed
 ```
 
-The full run prints all 269 assertions. Each `...` line above is where this block is cut. The line
+The full run prints all 278 assertions. Each `...` line above is where this block is cut. The line
 that starts with `info:` is a measurement, not an assertion. It is explained in
 [The equivalence argument](#the-equivalence-argument-the-clip-and-the-re-measure).
 
@@ -107,9 +112,9 @@ Python 3.9 or newer, [shapely](https://shapely.readthedocs.io/) 2 or newer, and
 network, no database. The inputs are GeoJSON files, which
 every GIS can export.
 
-The self-test prints 269 assertions on every interpreter below, and each run ends with `269
+The self-test prints 278 assertions on every interpreter below, and each run ends with `278
 assertions, 0 failed`. `coverage run --branch ng911topo.py --self-test` reports 100 percent of
-1311 statements and 278 branches (run on the geo venv row). The count is the same on Windows and
+1348 statements and 284 branches (run on the geo venv row). The count is the same on Windows and
 Linux because the self-test needs shapely and pyproj on both and uses no `arcpy`.
 
 | Host | Python | shapely | pyproj |
@@ -194,8 +199,8 @@ input is not noticed. Do not give `--out` a hard link to an input.
 
 Every output block below comes from these synthetic layers. They are not shipped as files. Save the
 script as `mkdemo.py`, run it in an empty folder, and the layers appear next to it. Coordinates
-are in EPSG:26917. The two other street layers are the same streets in US survey feet (EPSG:2237)
-and in degrees (EPSG:4326).
+are in EPSG:26917. The three other street layers are the same streets in US survey feet (EPSG:2237),
+in degrees (EPSG:4326) and in Web Mercator (EPSG:3857).
 
 ```python
 import json
@@ -258,6 +263,7 @@ def reproject(epsg, name):
 
 reproject(2237, "streets_ft.geojson")
 reproject(4326, "streets_ll.geojson")
+reproject(3857, "streets_merc.geojson")
 ```
 
 ## The sliver gate
@@ -276,7 +282,7 @@ For a long thin strip it is close to the strip's width. The demo layer has 18 sy
 
 ```
 $ python ng911topo.py --polygons areas.geojson --polygons-epsg 26917 --work-epsg 26917
-areas.geojson: EPSG:26917 is the work CRS, not transformed
+areas.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 0.9997 against the geodesic distance
 
 OVERLAPS
   18 polygon(s), 15 intersecting pair(s) compared
@@ -291,6 +297,7 @@ OVERLAPS
 
 GAPS
   4 uncovered hole(s) in the dissolved coverage
+  only enclosed holes are checked; a strip that reaches the outer edge of the coverage is not found, so a clean result does not rule it out
   area threshold: a case must exceed 1 sq m
   4 over the threshold, 0 suppressed
   nearest case above the threshold: 10 sq m
@@ -347,7 +354,7 @@ such as a P-shaped cul-de-sac drawn as one line.
 
 ```
 $ python ng911topo.py --streets streets.geojson --streets-epsg 26917 --work-epsg 26917 --sample 4
-streets.geojson: EPSG:26917 is the work CRS, not transformed
+streets.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 0.9997 against the geodesic distance
 
 SNAPGAP
   8 street(s), 16 end(s): 0 shared by another street, 0 joined to a street body, 0 on or beyond the boundary, 16 dangling
@@ -377,8 +384,8 @@ The second is an end beyond it:
 
 ```
 $ python ng911topo.py --streets streets.geojson --streets-epsg 26917 --boundary extent.geojson --boundary-epsg 26917 --work-epsg 26917 --sample 4
-streets.geojson: EPSG:26917 is the work CRS, not transformed
-extent.geojson: EPSG:26917 is the work CRS, not transformed
+streets.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 0.9997 against the geodesic distance
+extent.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 0.9997 against the geodesic distance
 
 SNAPGAP
   8 street(s), 16 end(s): 0 shared by another street, 0 joined to a street body, 2 on or beyond the boundary, 14 dangling
@@ -432,7 +439,7 @@ wrong place, or too small, the run prints nothing to standard output.
 
 ## The CRS is proved, not trusted
 
-An EPSG tag is a claim. The tool checks four things before it measures anything.
+An EPSG tag is a claim. The tool checks five things before it measures anything.
 
 1. The work CRS must be projected and measure in metres. A geographic CRS has no length in its
    units, and a CRS in feet would make every threshold wrong by a factor of 3.28. Either is refused.
@@ -448,6 +455,10 @@ An EPSG tag is a claim. The tool checks four things before it measures anything.
    distance must match the geodesic distance on the WGS 84 ellipsoid, within 0.5 percent. A layer
    that was re-tagged and not reprojected fails this check. So does a work CRS that is not
    metre-scale at the data, such as Web Mercator.
+5. A layer that is already in the work CRS is not transformed. Its scale is still checked: the
+   distance between the same two vertices must match the geodesic distance within 0.5 percent. A
+   layer tagged Web Mercator under a Web Mercator work CRS is refused, because it would measure
+   every area about 1.3 times too large at this latitude.
 
 The area of use comes from [`CRS.area_of_use`](https://pyproj4.github.io/pyproj/stable/api/crs/crs.html).
 The geodesic distance comes from [`Geod.inv`](https://pyproj4.github.io/pyproj/stable/api/geod.html)
@@ -505,6 +516,15 @@ refused: streets_ll.geojson: the data spans lon -82.03..-82.02, lat 29.37..29.39
 exit=3
 ```
 
+A layer that is already in Web Mercator is refused the same way when Web Mercator is also the work
+CRS, because the check does not depend on a transform having happened:
+
+```
+$ python ng911topo.py --streets streets_merc.geojson --streets-epsg 3857 --work-epsg 3857
+refused: streets_merc.geojson: EPSG:3857 is the work CRS, but the scale ratio is 1.15024 against the geodesic distance where a metre CRS at this place says 1; the work CRS is not metre-scale here (Web Mercator, EPSG:3857, is not). Name a projected CRS for this place
+exit=3
+```
+
 The metre file, tagged as feet, is refused:
 
 ```
@@ -550,7 +570,7 @@ What is measured and what is argued:
 - The self-test clips 40 random overlapping pairs of 120-vertex shapes and compares each with the
   uncut area. The largest difference is 2.27e-12 sq m, on every host that ran it. That is a measurement of
   40 pairs. It is not a proof for every shape.
-- The margin `CLIP_EPS` is about 400,000 times larger than that. The margin is a choice, not a
+- The margin `CLIP_EPS` is about 440,000 times larger than that. The margin is a choice, not a
   derived bound. A clip that is wrong by more than the margin on a pair far from the threshold would
   not be caught.
 - A test replaces the clip with one that loses 2.5e-7 sq m. Without the re-measure the verdict on a
@@ -581,7 +601,7 @@ Without `--apply` the tool prints `Check only` and writes nothing.
 
 ```
 $ python ng911topo.py --polygons areas.geojson --polygons-epsg 26917 --work-epsg 26917 --out findings.csv --sample 0
-areas.geojson: EPSG:26917 is the work CRS, not transformed
+areas.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 0.9997 against the geodesic distance
 
 OVERLAPS
   18 polygon(s), 15 intersecting pair(s) compared
@@ -596,6 +616,7 @@ OVERLAPS
 
 GAPS
   4 uncovered hole(s) in the dissolved coverage
+  only enclosed holes are checked; a strip that reaches the outer edge of the coverage is not found, so a clean result does not rule it out
   area threshold: a case must exceed 1 sq m
   4 over the threshold, 0 suppressed
   nearest case above the threshold: 10 sq m
@@ -668,6 +689,8 @@ keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as wr
   A strip that runs across the whole coverage, such as a 5 m strip that fully separates two
   polygons, reaches the outer edge at both ends. It is not a hole either, and the run exits 0 with
   `0 uncovered hole(s)`.
+  The report prints a line that says so on every run. Treat an exit 0 as "no enclosed hole", not
+  as "no uncovered ground".
 - The default thresholds are starting values for a metre CRS, not measurements. Measure your own
   layers. The nearest case above each gate is printed so that you can.
 - A hole that is drawn into one polygon is treated as deliberate. A wide hole ringed by several
@@ -722,6 +745,28 @@ keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as wr
   is saved and opened again. The apostrophe shows in a viewer that does not treat it as a text marker,
   for example a text editor or a script that reads the CSV. A key that already starts with an
   apostrophe is not changed, so the guard cannot be undone exactly.
+- A layer whose every vertex is at one location, such as a single zero-length street, is refused with
+  exit 3, because the scale of the work CRS cannot be proved from one point.
+- With shapely 2.2 or newer, the tool prints a `DeprecationWarning` for `shapely.ops.transform` to
+  stderr on each run that reprojects a layer. This was seen on Linux with Python 3.12.3 and shapely
+  2.2.0. The verdict and the exit code do not change, and the table in Requirements lists shapely only
+  up to 2.1.2.
+- Do not run the tool with `python -W error`. The self-test then fails one assertion, because a
+  `nan` coordinate makes shapely warn and the run exits 2 instead of 3. With shapely 2.2 or newer, a
+  run that reprojects a layer exits 70 on the deprecation warning above.
+- A GeoJSON file nested about 100000 levels deep hits the recursion limit of Python and exits 70
+  with a `RecursionError` traceback.
+- A pyproj error other than a CRS error during a transform, such as a `ProjError`, exits 70 as a
+  crash, not 3 as a refusal.
+- With `--apply`, a run that exits 4 because every layer was empty returns before it writes, so a
+  findings file from an earlier run stays in place. A job should read the exit code, not look for
+  the file.
+- A typo in `--key-field` gives no warning. Every key becomes `#<position>`, and the run still
+  exits 0 or 1 on the result.
+- A feature with no geometry is counted in a note and skipped. A layer that is half null still
+  exits 0 or 1 on its other half.
+- The no-socket assertion replaces `socket.connect` in Python, so it cannot see a network fetch that
+  the PROJ library makes by itself. That is the `PROJ_NETWORK=ON` case named below.
 - A character that the console cannot show prints as `?`. The file is always UTF-8.
 - The ArcGIS pages for the "must not have gaps" and "must not have dangles" rules did not load when
   this was written, so the comparison above cites only the QGIS manual for those two rules.

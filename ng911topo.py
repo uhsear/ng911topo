@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Find response-area polygons that overlap, ground no polygon covers, and street ends that stop short.
+"""Find response-area polygons that overlap, enclosed ground no polygon covers, and street ends that stop short.
 
 Reports its own thresholds, what each threshold suppressed, and the nearest
 case just above it. Refuses to run when a boundary layer it was told to use
@@ -361,6 +361,25 @@ def prove_reprojection(src_geographic, factor, a_src, b_src, a_out, b_out,
                    "CRS first" % ratio)
 
 
+def prove_work_scale(planar, geodesic):
+    """Decide whether a layer already in the work CRS measures in true metres
+    at its place. planar is the distance in work units between the two most
+    distant sampled vertices, geodesic the distance in metres between the
+    same two. Returns (ok, text). A CRS that says metres can still be far
+    from metre-scale at the data, as Web Mercator (EPSG:3857) is."""
+    if planar <= 0.0 or geodesic <= 0.0:
+        return False, ("every vertex is at one location, so the scale of the "
+                       "work CRS cannot be proved")
+    ratio = planar / geodesic
+    if abs(ratio - 1.0) <= PROOF_TOL:
+        return True, ("scale ratio %.4f against the geodesic distance"
+                      % ratio)
+    return False, ("the scale ratio is %.5f against the geodesic distance "
+                   "where a metre CRS at this place says 1; the work CRS is "
+                   "not metre-scale here (Web Mercator, EPSG:3857, is not). "
+                   "Name a projected CRS for this place" % ratio)
+
+
 def convert_layer(feats, src, work, label, margin=AOU_MARGIN_DEG):
     """Reproject feats from src to work and prove it happened. Returns
     (feats, note). Raises Refusal when the tag or the transform is wrong."""
@@ -377,9 +396,23 @@ def convert_layer(feats, src, work, label, margin=AOU_MARGIN_DEG):
     problem, aou_note = aou_verdict(src["aou"], bounds, margin)
     if problem:
         raise Refusal("%s: %s" % (label, problem))
+    before = shapely.get_coordinates(geoms).tolist()
+    far = max(range(len(before)),
+              key=lambda n: (before[n][0] - before[0][0]) ** 2
+              + (before[n][1] - before[0][1]) ** 2)
     if src["epsg"] == work["epsg"]:
-        note = ("%s: EPSG:%d is the work CRS, not transformed"
-                % (label, src["epsg"]))
+        lons, lats = to_ll.transform([before[0][0], before[far][0]],
+                                     [before[0][1], before[far][1]])
+        ok, text = prove_work_scale(
+            math.hypot(before[far][0] - before[0][0],
+                       before[far][1] - before[0][1]),
+            pyproj.Geod(ellps="WGS84").inv(lons[0], lats[0], lons[1],
+                                           lats[1])[2])
+        if not ok:
+            raise Refusal("%s: EPSG:%d is the work CRS, but %s"
+                          % (label, src["epsg"], text))
+        note = ("%s: EPSG:%d is the work CRS, not transformed; %s"
+                % (label, src["epsg"], text))
         return feats, note + ("; " + aou_note if aou_note else "")
     problem, _ = aou_verdict(
         work["aou"], bounds, margin, "the work CRS EPSG:%d" % work["epsg"],
@@ -388,11 +421,7 @@ def convert_layer(feats, src, work, label, margin=AOU_MARGIN_DEG):
         raise Refusal("%s: %s" % (label, problem))
     tr = pyproj.Transformer.from_crs(src["epsg"], work["epsg"], always_xy=True)
     out = [shapely.ops.transform(tr.transform, g) for g in geoms]
-    before = shapely.get_coordinates(geoms).tolist()
     after = shapely.get_coordinates(out).tolist()
-    far = max(range(len(before)),
-              key=lambda n: (before[n][0] - before[0][0]) ** 2
-              + (before[n][1] - before[0][1]) ** 2)
     geodesic = None
     if src["geographic"]:
         geodesic = pyproj.Geod(ellps="WGS84").inv(
@@ -832,7 +861,10 @@ def overlap_section(feats, tol, eps=CLIP_EPS):
 def gap_section(feats, tol, min_width):
     findings, info = find_gaps(feats, tol, min_width)
     header = ["  %d uncovered hole(s) in the dissolved coverage"
-              % info["holes"]]
+              % info["holes"],
+              "  only enclosed holes are checked; a strip that reaches the "
+              "outer edge of the coverage is not found, so a clean result "
+              "does not rule it out"]
     header += gate_text("area", info["area"], "sq m")
     header += gate_text("width", info["width"], "m")
     return ("GAPS", header, findings)
@@ -1496,6 +1528,28 @@ def _self_test(tmp):
         why = str(exc)
     check("scale ratio is 0.8" in why and "Web Mercator" in why and "Reproject it" in why,
           "correctly tagged Web Mercator is refused with a message that names its scale, not only 're-tagged'  <-- pinned defect")
+    why = ""
+    try:
+        convert_layer(merc, crs_facts(3857), crs_facts(3857), "merc-same")
+    except Refusal as exc:
+        why = str(exc)
+    check("is the work CRS, but" in why and "scale ratio is 1.1" in why and "Web Mercator" in why,
+          "a layer tagged Web Mercator with Web Mercator as the work CRS is refused, not measured 1.32 times too large  <-- pinned defect")
+    got, note = convert_layer(line_utm, work, work, "same-scale")
+    check("scale ratio 0.9997" in note and "geodesic distance" in note,
+          "a layer in the work CRS passes only after its scale is proved against the geodesic distance  <-- pinned defect")
+    ok, why = prove_work_scale(0.0, 0.0)
+    check(not ok and "cannot be proved" in why,
+          "a layer at one location cannot prove the scale of the work CRS and is refused")
+    ok, why = prove_work_scale(100.0, 0.0)
+    check(not ok and "cannot be proved" in why,
+          "a zero geodesic distance cannot prove the scale of the work CRS and is refused")
+    ok, why = prove_work_scale(100.0, 100.0 * (1.0 + 2.0 * PROOF_TOL))
+    check(not ok and "Name a projected CRS" in why,
+          "a work-CRS scale ratio just outside the proof tolerance is refused")
+    ok, why = prove_work_scale(100.0, 100.0 * (1.0 + 0.5 * PROOF_TOL))
+    check(ok and "scale ratio" in why,
+          "a work-CRS scale ratio just inside the proof tolerance passes")
     upright = [Feat(0, "L", shapely.LineString([(ft[0][0], ft[0][1]), (ft[0][0], ft[0][1] + 500.0),
                                                 (ft[0][0], ft[0][1] + 1000.0)]))]
     got, note = convert_layer(upright, f2237, work, "upright")
@@ -1669,6 +1723,15 @@ def _self_test(tmp):
           "polygons that overlap exit 1 and the report names the threshold, the suppressed case and the nearest above")
     check("GAPS" in out and "0 uncovered hole(s)" in out,
           "the same run reports its gap check even when it finds no hole")
+    seam = write_json("seam.geojson", [pfeat("WEST", sqp(0, 0, 100, 100)), pfeat("EAST", sqp(105, 0, 100, 100))])
+    code, out, err = run(["--polygons", seam, "--polygons-epsg", "26917"] + base)
+    check(code == 0 and "0 uncovered hole(s)" in out and "does not rule it out" in out and err == "",
+          "a 5 m seam that runs to the outer edge exits 0 and the report says the strip was not checked  <-- pinned defect")
+    shut = write_json("shut.geojson", [pfeat("WEST", sqp(0, 0, 100, 100)), pfeat("EAST", sqp(105, 0, 100, 100)),
+                                       pfeat("TOP", sqp(0, 100, 205, 10)), pfeat("BOTTOM", sqp(0, -10, 205, 10))])
+    code, out, err = run(["--polygons", shut, "--polygons-epsg", "26917"] + base)
+    check(code == 1 and "1 uncovered hole(s)" in out and "500.0000 sq m" in out,
+          "the same seam closed at both ends is a hole and fails the gate")
     code, out, err = run(["--polygons", clean, "--polygons-epsg", "26917"] + base)
     check(code == 0 and "0 over the threshold, 0 suppressed" in out,
           "clean polygons exit 0")
@@ -1775,6 +1838,12 @@ def _self_test(tmp):
     code, out, err = run(["--polygons", ll, "--polygons-epsg", "4326", "--work-epsg", "3857"])
     check(code == 3 and out == "" and "Web Mercator" in err,
           "degree polygons are refused under Web Mercator and nothing is printed  <-- pinned defect")
+    merc_sq = [pfeat("A", shapely.ops.transform(to_merc.transform, box(400000.0, 3250000.0, 400010.0, 3250010.0))),
+               pfeat("B", shapely.ops.transform(to_merc.transform, box(400009.0, 3250000.0, 400020.0, 3250010.0)))]
+    merc_same = write_json("merc_same.geojson", merc_sq)
+    code, out, err = run(["--polygons", merc_same, "--polygons-epsg", "3857", "--work-epsg", "3857"])
+    check(code == 3 and out == "" and "Web Mercator" in err and "is the work CRS, but" in err,
+          "polygons tagged 3857 under work CRS 3857 are refused and nothing is printed, where a 0.76 sq m overlap read 1.0 and failed the gate  <-- pinned defect")
     code, out, err = run(["--polygons", clean, "--polygons-epsg", "999999"] + base)
     check(code == 3 and "not a code PROJ knows" in err, "an unknown EPSG for an input is refused")
     code, out, err = run(["--polygons", clean, "--polygons-epsg", "26917",
