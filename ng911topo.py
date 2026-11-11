@@ -164,6 +164,21 @@ class Feat(object):
         self.geom = geom
 
 
+# A spreadsheet runs a cell that starts with one of these as a formula. Text
+# from the input files reaches the CSV as key, other and detail.
+FORMULA_LEADERS = ("=", "+", "-", "@", chr(9), chr(13))
+
+
+def cell(value):
+    """A CSV text cell that a spreadsheet will not run as a formula: one
+    apostrophe goes in front of a leading = + - @ tab or CR. The numeric
+    columns (value, x, y) never pass through here, so they stay numbers.
+    The tool never reads its own CSV back, so nothing strips the prefix."""
+    if value[:1] in FORMULA_LEADERS:
+        return "'" + value
+    return value
+
+
 class Finding(object):
     """One row of output: a reported case, an informational one, or a
     suppressed one kept so the suppression can be audited."""
@@ -180,9 +195,10 @@ class Finding(object):
         self.detail = detail
 
     def row(self):
-        return [self.check, self.status, self.cls, self.key, self.other,
+        return [cell(self.check), cell(self.status), cell(self.cls),
+                cell(self.key), cell(self.other),
                 "" if self.value is None else "%.4f" % self.value,
-                "%.3f" % self.x, "%.3f" % self.y, self.detail]
+                "%.3f" % self.x, "%.3f" % self.y, cell(self.detail)]
 
 
 class Gate(object):
@@ -1573,6 +1589,49 @@ def _self_test(tmp):
           and rows[4][1] == SUPPRESSED,
           "the findings CSV holds every finding, suppressed ones included, with its header")
 
+    # ---- formula injection: a text cell never starts a spreadsheet formula
+    clean_kw = {"check": "overlap", "status": REPORTED, "cls": "overlap",
+                "key": "k", "other": "o", "detail": "d"}
+
+    def row_of(**over):
+        kw = dict(clean_kw, **over)
+        return Finding(kw["check"], kw["status"], kw["cls"], kw["key"],
+                       kw["other"], 1.0, 1, 2, kw["detail"]).row()
+
+    clean_row = row_of()
+    leaders = (("an equals sign", "="), ("a plus sign", "+"),
+               ("a minus sign", "-"), ("an at sign", "@"),
+               ("a tab", chr(9)), ("a carriage return", chr(13)))
+    for field, column in (("check", "check"), ("status", "status"),
+                          ("cls", "class"), ("key", "key"),
+                          ("other", "other"), ("detail", "detail")):
+        at_col = OUT_COLUMNS.index(column)
+        for what, lead in leaders:
+            got = row_of(**{field: lead + "x"})
+            rest = [c for i, c in enumerate(got) if i != at_col]
+            want = [c for i, c in enumerate(clean_row) if i != at_col]
+            check(got[at_col] == "'" + lead + "x" and rest == want,
+                  "the %s column gets one apostrophe before %s and nothing else changes  <-- pinned defect"
+                  % (column, what))
+    neg = Finding("gap", REPORTED, "gap", "k", "", -2.5, -10.0, -3.5, "d").row()
+    check(neg[5:8] == ["-2.5000", "-10.000", "-3.500"]
+          and [float(c) for c in neg[5:8]] == [-2.5, -10.0, -3.5],
+          "negative value, x and y stay plain numbers with no apostrophe  <-- pinned defect")
+    check(cell("") == "" and cell("ZONE-1") == "ZONE-1" and cell("a=b") == "a=b"
+          and cell("'q'") == "'q'" and cell("#3") == "#3"
+          and cell("=1+1") == "'=1+1",
+          "a cell that does not start with a leader is written as it came, an empty one stays empty")
+    hostile = [Finding("overlap", REPORTED, "overlap", chr(9) + "T", chr(13) + "C",
+                       1.0, 1, 2, "=d")]
+    hostile_csv = os.path.join(tmp, "hostile.csv")
+    write_findings(hostile_csv, [("T", [], hostile)])
+    with io.open(hostile_csv, "r", encoding="utf-8", newline="") as fh:
+        hrows = list(csv.reader(fh))
+    check(len(hrows) == 2 and hrows[1][3] == "'" + chr(9) + "T"
+          and hrows[1][4] == "'" + chr(13) + "C" and hrows[1][8] == "'=d"
+          and hrows[1][5:8] == ["1.0000", "1.000", "2.000"],
+          "write_findings puts the apostrophe in the file for a tab and a CR key, and the file reads back as one row")
+
     # ---- the CLI, end to end
     BX, BY = 400000.0, 3250000.0
 
@@ -1606,6 +1665,37 @@ def _self_test(tmp):
         body = fh.read()
     check(code == 1 and "wrote " in out and "suppressed,overlap,Q,R" in body,
           "with --apply the findings file is written and keeps the suppressed case")
+    hot_areas = write_json("hot.geojson", [
+        pfeat("=SUM(1+1)", sqp(0, 0)), pfeat(chr(9) + "B", sqp(5, 0)),
+        pfeat("+Z", sqp(100, 0)), pfeat("@Y", sqp(105, 0)),
+        pfeat("-X", sqp(200, 0)), pfeat(chr(13) + "W", sqp(205, 0))])
+    hot_csv = os.path.join(tmp, "hot.csv")
+    code, out, err = run(["--polygons", hot_areas, "--polygons-epsg", "26917",
+                          "--out", hot_csv, "--apply"] + base)
+    with io.open(hot_csv, "r", encoding="utf-8", newline="") as fh:
+        hot = list(csv.reader(fh))[1:]
+    pairs = sorted(sorted([r[3], r[4]]) for r in hot if r[0] == "overlap")
+    check(code == 1 and pairs == sorted([
+        sorted(["'=SUM(1+1)", "'" + chr(9) + "B"]), sorted(["'+Z", "'@Y"]),
+        sorted(["'-X", "'" + chr(13) + "W"])]),
+          "a real run over keys that start with = + - @ tab and CR writes each with one apostrophe  <-- pinned defect")
+    check(all(r[i][:1] not in FORMULA_LEADERS for r in hot for i in (0, 1, 2, 3, 4, 8))
+          and all(isinstance(float(r[j]), float) for r in hot for j in (6, 7)),
+          "no text cell of the findings file starts with a formula leader and x and y stay numbers")
+    check("overlaps" in out and "'=SUM(1+1)'" in out,
+          "the terminal report still shows the key as it came, only the file is guarded")
+    hot_streets = write_json("hot_streets.geojson", [
+        lfeat("-A", [[BX, BY], [BX + 100, BY]]),
+        lfeat("@B", [[BX + 50, BY + 5], [BX + 50, BY + 60]])])
+    hot_scsv = os.path.join(tmp, "hot_streets.csv")
+    code, out, err = run(["--streets", hot_streets, "--streets-epsg", "26917",
+                          "--out", hot_scsv, "--apply"] + base)
+    with io.open(hot_scsv, "r", encoding="utf-8", newline="") as fh:
+        srows = list(csv.reader(fh))[1:]
+    check(code == 1 and any(r[2] == "fallout" and r[3] == "'@B" and r[4] == "'-A"
+                            for r in srows)
+          and "end stops 5.00 m from '-A'" in out,
+          "a street key that starts with a minus sign or an at sign is guarded in the snapgap rows  <-- pinned defect")
     blocked = os.path.join(tmp, "blocked.csv")
     code, out, err = run(["--polygons", areas, "--polygons-epsg", "26917",
                           "--out", blocked, "--appl"] + base)

@@ -52,6 +52,12 @@ PASS  degree polygons are refused under Web Mercator and nothing is printed  <--
 ...
 PASS  an end that lands on its own line's body is joined, so a lollipop is not fallout against its neighbour  <-- pinned defect
 ...
+PASS  the key column gets one apostrophe before a tab and nothing else changes  <-- pinned defect
+...
+PASS  negative value, x and y stay plain numbers with no apostrophe  <-- pinned defect
+...
+PASS  a real run over keys that start with = + - @ tab and CR writes each with one apostrophe  <-- pinned defect
+...
 PASS  a prefix of the write flag is refused and nothing is written  <-- pinned defect
 PASS  the prefix --ap is refused by the parser  <-- pinned defect
 ...
@@ -62,10 +68,10 @@ PASS  a full run opens no socket, and the guard would have caught one
 PASS  an unexpected exception exits 70, not the 1 that means a gate failed  <-- pinned defect
 ...
 --------------------------------------------------------------------
-220 assertions, 0 failed
+263 assertions, 0 failed
 ```
 
-The full run prints all 220 assertions. Each `...` line above is where this block is cut. The line
+The full run prints all 263 assertions. Each `...` line above is where this block is cut. The line
 that starts with `info:` is a measurement, not an assertion. It is explained in
 [The equivalence argument](#the-equivalence-argument-the-clip-and-the-re-measure).
 
@@ -99,9 +105,10 @@ Python 3.9 or newer, [shapely](https://shapely.readthedocs.io/) 2 or newer, and
 standard-library only. No `arcpy`, no network, no database. The inputs are GeoJSON files, which
 every GIS can export.
 
-The self-test prints 220 assertions on every interpreter below, and each run ends with `220
+The self-test prints 263 assertions on every interpreter below, and each run ends with `263
 assertions, 0 failed`. `coverage run --branch ng911topo.py --self-test` reports 100 percent of
-1235 statements and 268 branches (run on the geo venv row).
+1277 statements and 274 branches (run on the geo venv row). The count is the same on Windows and
+Linux because the self-test needs shapely and pyproj on both and uses no `arcpy`.
 
 | Host | Python | shapely | pyproj |
 |---|---|---|---|
@@ -619,6 +626,27 @@ gap,suppressed,narrow,,,10.0000,403000.050,3250050.000,"10.0000 sq m hole, mean 
 The columns are `check`, `status`, `class`, `key`, `other`, `value`, `x`, `y` and `detail`. The `x`
 and `y` are in the work CRS. A row sits inside the overlap or hole, so an analyst can zoom to it.
 
+### Keys that start like a formula
+
+The `key` and `other` columns, and the `detail` text that quotes them, come from the input file. A
+spreadsheet runs a cell that starts with `=`, `+`, `-` or `@` as a formula, and OWASP also lists a
+tab and a carriage return
+([CSV Injection](https://owasp.org/www-community/attacks/CSV_Injection)). The tool puts one
+apostrophe in front of such a text cell. It guards the six text columns: `check`, `status`,
+`class`, `key`, `other` and `detail`. The `value`, `x` and `y` columns are numbers and are never
+changed, so a negative coordinate stays `-10.000`. Only the file is guarded. The terminal report
+shows the key as it came. The tool never reads its own CSV back, so nothing strips the prefix.
+
+```
+$ python ng911topo.py --polygons hot.geojson --polygons-epsg 26917 --work-epsg 26917 --out hot.csv --apply
+$ cat hot.csv
+check,status,class,key,other,value,x,y,detail
+overlap,reported,overlap,'=SUM(1+1),'-ZONE-2,50.0000,400007.500,3250005.000,'=SUM(1+1)' overlaps '-ZONE-2' by 50.0000 sq m
+```
+
+`hot.geojson` holds two synthetic squares keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the
+file held `=SUM(1+1)` and `-ZONE-2` as written.
+
 ## Limits
 
 - It checks street ends against other streets. It does not yet check that a road crosses an
@@ -678,8 +706,13 @@ and `y` are in the work CRS. A row sits inside the overlap or hole, so an analys
   shapely 2.0.7 and pyproj 3.6.1.
 - A MultiLineString becomes one street per part. Z values are dropped.
 - The findings file is written in place, not through a temporary file. A failed write can leave a
-  partial file, and the exit code is 2. A key that starts with `=`, `+`, `-` or `@` is written as it
-  came. A spreadsheet may read it as a formula.
+  partial file, and the exit code is 2.
+- The formula guard covers the six leaders `=`, `+`, `-`, `@`, tab and carriage return. OWASP also
+  lists a line feed and the full-width forms of `=` and `+`. A key that starts with one of those is
+  written as it came. OWASP also notes that its mitigations are not reliable in Excel after the file
+  is saved and opened again. The apostrophe shows in a viewer that does not treat it as a text marker,
+  for example a text editor or a script that reads the CSV. A key that already starts with an
+  apostrophe is not changed, so the guard cannot be undone exactly.
 - A character that the console cannot show prints as `?`. The file is always UTF-8.
 - The ArcGIS pages for the "must not have gaps" and "must not have dangles" rules did not load when
   this was written, so the comparison above cites only the QGIS manual for those two rules.
