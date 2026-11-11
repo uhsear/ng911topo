@@ -103,8 +103,8 @@ only that the search found nothing.
 ## Requirements
 
 Python 3.9 or newer, [shapely](https://shapely.readthedocs.io/) 2 or newer, and
-[pyproj](https://pyproj4.github.io/pyproj/). This is the one tool in the portfolio that is not
-standard-library only. No `arcpy`, no network, no database. The inputs are GeoJSON files, which
+[pyproj](https://pyproj4.github.io/pyproj/). Neither is in the standard library. No `arcpy`, no
+network, no database. The inputs are GeoJSON files, which
 every GIS can export.
 
 The self-test prints 267 assertions on every interpreter below, and each run ends with `267
@@ -123,9 +123,12 @@ The system `python3` on a stock Ubuntu has neither shapely nor pyproj. There `py
 ng911topo.py --self-test` exits 69 and says what is missing. Install both in a virtual environment
 first.
 
-The demo runs below produce the same text on the Windows venv and on Ubuntu. The only difference
-is that Windows turns each line break of the report into CRLF when the output is redirected to a
-file. The findings CSV ends every row with CRLF on every host, because `csv.writer` uses that
+The demo runs below produce the same text on the Windows venv and on Ubuntu, with two differences.
+Windows turns each line break of the report into CRLF when the output is redirected to a file. The
+reprojection line of the EPSG:4326 streets example (`scale ratio` and `PROJ accuracy`) also differs
+between the two hosts with the same pyproj 3.8.0 and shapely 2.1.2: Windows prints `0.99973` and
+`-1.0`, and Ubuntu prints `0.99972` and `4.0`. The block below shows the Windows values. The
+cause was not traced. Neither value changes a verdict. The findings CSV ends every row with CRLF on every host, because `csv.writer` uses that
 terminator by default.
 
 ```
@@ -314,8 +317,8 @@ What each result means:
   mistake from a deliberate one. It reports a suspect enclave and asks a person to check. A hole
   with a mean width over 20 times the width gate (at least 3 m) that several polygons border is
   never passed silently.
-- `RING` has a hole drawn into the one polygon. Only that case is provably deliberate, so it is
-  listed as information and passes.
+- `RING` has a hole drawn into the one polygon. The tool treats that case as deliberate and cannot
+  prove it, because an accidental inner ring looks the same. It is listed as information and passes.
 - `CRACK-*` leave a hole 0.1 m wide. The width gate dropped it, and the report names its width.
 
 The overlap gate and the width gate each dropped one case in this run. The area gate of the gap
@@ -330,7 +333,7 @@ tool sorts every dangle into one of three classes.
 |---|---|---|
 | `fallout` | REPORTED | The end stops within the snap tolerance of another street and is not joined to it. It fails the gate. |
 | `isolated` | INFO | A dead end. The nearest street is beyond the snap tolerance. It is listed and passes. |
-| `boundary` | SUPPRESSED | The end lies outside the boundary layer, or within the snap tolerance of its edge. The row names a street that is also within the snap tolerance. |
+| `boundary` | SUPPRESSED | The end lies outside the boundary layer, or inside it and within the snap tolerance of its edge with no street within the snap tolerance. An end outside the layer names a street that is within the snap tolerance. |
 
 The distances of the `fallout` ends go into a histogram, and the busiest bin is marked. Four stubs
 that stop 6.5 to 7.6 m short of one street show up as one bar. A tool that prints a flat list
@@ -545,9 +548,9 @@ GEOS error, the tool falls back to the uncut polygons for that pair.
 What is measured and what is argued:
 
 - The self-test clips 40 random overlapping pairs of 120-vertex shapes and compares each with the
-  uncut area. The largest difference is 2.27e-12 sq m, on all three hosts. That is a measurement of
+  uncut area. The largest difference is 2.27e-12 sq m, on every host that ran it. That is a measurement of
   40 pairs. It is not a proof for every shape.
-- The margin `CLIP_EPS` is about a million times larger than that. The margin is a choice, not a
+- The margin `CLIP_EPS` is about 400,000 times larger than that. The margin is a choice, not a
   derived bound. A clip that is wrong by more than the margin on a pair far from the threshold would
   not be caught.
 - A test replaces the clip with one that loses 2.5e-7 sq m. Without the re-measure the verdict on a
@@ -658,7 +661,7 @@ keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as wr
 - GeoJSON only. No geodatabase, no shapefile, no SDE connection. Reading a geodatabase would need
   `arcpy`.
 - Both layers are read into memory. In a one-off check on the Windows host, a synthetic grid of 2500
-  polygons and a set of 3000 streets each ran in about one second. That check is not in the
+  polygons and a set of 3000 streets each ran in under two seconds. That check is not in the
   self-test. A statewide layer is not what this is for.
 - The gap check finds holes in the dissolved coverage. A strip along the outer edge of the whole
   coverage is not a hole and is not found. An open channel that reaches the outer edge is not a hole.
@@ -682,8 +685,10 @@ keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as wr
 - A coordinate of `NaN` or `Infinity` in GeoJSON is not valid JSON, but Python reads it. `Infinity`
   is refused with exit 3 by the area-of-use check. A `NaN` is not refused: a street with an end at
   `(nan, y)` is listed as an INFO isolated dead end and the run exits 0, and a `NaN` in one
-  position of one street can also raise a shapely `RuntimeWarning` and exit 1. GeoJSON from
-  standard tools never carries `NaN`.
+  position of one street can also raise a shapely `RuntimeWarning`. A `NaN` coordinate
+  in any street also makes the nearest-street distance `NaN` for the ends near it, which can hide a
+  real street end that stops short, and the run still exits 0. GeoJSON from standard tools never
+  carries `NaN`.
 - A GeoJSON file saved with a UTF-8 byte order mark exits 2 with `Unexpected UTF-8 BOM (decode
   using utf-8-sig)`. It is refused and never read as clean, but Windows tools write such files
   often. Save the file as UTF-8 without a BOM.
@@ -693,12 +698,12 @@ keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as wr
 - A key that holds an escape character or a line break is printed to the terminal as it came, so a
   hostile file can clear the screen, set the window title or forge a line that looks like a
   finding. Run the tool on files you trust.
-- A street end that lies outside the boundary layer, or within the snap tolerance of its edge, is
-  SUPPRESSED even when another street is nearer than the snap tolerance. A real fallout near the
-  edge can therefore be listed only as suppressed, and the run exits 0. The row names that street,
-  but this rule hides real gaps next to the edge. A boundary layer that holds only half of the
-  street ends passes the default check and then hides the fallout at the other half. Raise
-  `--min-boundary-cover` for a partial layer.
+- A street end that lies outside the boundary layer is SUPPRESSED even when another street is
+  nearer than the snap tolerance. The row names that street, but the run can exit 0 on a real gap
+  next to the edge. An end inside the layer and within the snap tolerance of its edge is suppressed
+  only when no street is within the snap tolerance. Otherwise it is fallout and fails the gate.
+  A boundary layer that holds only half of the street ends passes the default check and then
+  hides the fallout at the other half. Raise `--min-boundary-cover` for a partial layer.
 - Street ends within `--node-tol` of each other count as one shared node, so a dangling stub of
   0.05 m or less is never reported. A closed loop whose two ends meet within that distance, and that
   joins no other street, is not reported either. A zero-length street is one node and is never

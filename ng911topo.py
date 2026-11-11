@@ -697,7 +697,10 @@ def classify_dangles(lines, snap, isolated, node_tol, boundary=None):
     so a node's degree does not depend on where a rounding grid falls. An end
     within node_tol of another street's body is joined (a T junction) and is
     not a dangle. Then boundary, then fallout (a street within snap), then an
-    isolated dead end, which carries the distance to what is nearest."""
+    isolated dead end, which carries the distance to what is nearest. An end
+    outside the boundary layer is suppressed. An end inside it but within snap
+    of its edge is suppressed only when no street is within snap, because a
+    street that near makes it a possible gap the edge must not hide."""
     ends = endpoints_of(lines)
     pts = [p for _, p in ends]
     tree = shapely.STRtree(pts)
@@ -736,13 +739,14 @@ def classify_dangles(lines, snap, isolated, node_tol, boundary=None):
         key = lines[i].key
         if boundary is not None:
             outside = not boundary.covers(p)
-            if outside or edge.distance(p) <= snap:
+            beside = bool(near) and near[0][0] <= snap
+            if outside or (edge.distance(p) <= snap and not beside):
                 counts["boundary"] += 1
                 why = ("end lies outside the boundary layer, so it leaves "
                        "the area" if outside else
                        "end lies within %.4g m of the boundary edge, so it "
                        "is taken to leave the area" % snap)
-                if near and near[0][0] <= snap:
+                if beside:
                     why += ("; street '%s' is %.2f m away, so this may be a "
                             "gap that the boundary hides"
                             % (lines[near[0][1]].key, near[0][0]))
@@ -1315,14 +1319,19 @@ def _self_test(tmp):
           "an end beyond the boundary layer is suppressed, and kept as a suppressed finding")
     check(at(out, 700, 10).cls == "boundary",
           "an end inside the boundary layer but within the snap tolerance of its edge is suppressed")
-    check(at(out, 500, 20).cls == "boundary",
-          "boundary suppression wins over fallout for an end that is near both")
-    check("street 'W' is 5.00 m away" in getattr(at(out, 500, 20), "detail", "")
+    check(at(out, 500, 20).cls == "fallout" and at(out, 500, 20).status == REPORTED
+          and at(out, 500, 20).other == "W",
+          "an end inside the boundary layer, within the snap tolerance of its edge and of another street, is fallout and fails the gate  <-- pinned defect")
+    out_near, _ = classify([("X", [(950, 1005), (950, 1200)]),
+                            ("Y", [(930, 900), (930, 1002)])],
+                           snap=30.0, isolated=30.0, boundary=county)
+    check(at(out_near, 950, 1005).cls == "boundary"
+          and "street 'Y' is 20.22 m away" in at(out_near, 950, 1005).detail
           and "street" not in at(out, 500, 1100).detail.replace("street ends", ""),
-          "a suppressed end with a street inside the snap tolerance names that street, so the hidden gap is visible  <-- pinned defect")
+          "an end outside the boundary layer stays suppressed, and names a street inside the snap tolerance so the hidden gap is visible")
     check(at(out, 800, 505).cls == "fallout" and at(out, 800, 505).status == REPORTED,
           "an interior fallout is not touched by the boundary layer")
-    check(at(out, 300, 500).cls == "isolated" and info["counts"]["boundary"] == 5,
+    check(at(out, 300, 500).cls == "isolated" and info["counts"]["boundary"] == 4,
           "an interior dead end stays isolated with a boundary layer present")
     check("lies outside the boundary layer" in at(out, 500, 1100).detail
           and "within 30 m of the boundary edge" in at(out, 700, 10).detail,
