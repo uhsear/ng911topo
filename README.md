@@ -61,6 +61,8 @@ PASS  a real run over keys that start with = + - @ tab and CR writes each with o
 PASS  a prefix of the write flag is refused and nothing is written  <-- pinned defect
 PASS  the prefix --ap is refused by the parser  <-- pinned defect
 ...
+PASS  --overlap-tol nan exits 64 and prints no report, not a clean 0 with a real overlap hidden  <-- pinned defect
+...
 PASS  a boundary layer that cannot be read exits 2 and prints no findings, where the unguarded run printed them  <-- pinned defect
 PASS  a boundary layer in the wrong place is refused with no findings printed  <-- pinned defect
 ...
@@ -68,10 +70,10 @@ PASS  a full run opens no socket, and the guard would have caught one
 PASS  an unexpected exception exits 70, not the 1 that means a gate failed  <-- pinned defect
 ...
 --------------------------------------------------------------------
-263 assertions, 0 failed
+267 assertions, 0 failed
 ```
 
-The full run prints all 263 assertions. Each `...` line above is where this block is cut. The line
+The full run prints all 267 assertions. Each `...` line above is where this block is cut. The line
 that starts with `info:` is a measurement, not an assertion. It is explained in
 [The equivalence argument](#the-equivalence-argument-the-clip-and-the-re-measure).
 
@@ -105,9 +107,9 @@ Python 3.9 or newer, [shapely](https://shapely.readthedocs.io/) 2 or newer, and
 standard-library only. No `arcpy`, no network, no database. The inputs are GeoJSON files, which
 every GIS can export.
 
-The self-test prints 263 assertions on every interpreter below, and each run ends with `263
+The self-test prints 267 assertions on every interpreter below, and each run ends with `267
 assertions, 0 failed`. `coverage run --branch ng911topo.py --self-test` reports 100 percent of
-1277 statements and 274 branches (run on the geo venv row). The count is the same on Windows and
+1301 statements and 276 branches (run on the geo venv row). The count is the same on Windows and
 Linux because the self-test needs shapely and pyproj on both and uses no `arcpy`.
 
 | Host | Python | shapely | pyproj |
@@ -122,8 +124,9 @@ ng911topo.py --self-test` exits 69 and says what is missing. Install both in a v
 first.
 
 The demo runs below produce the same text on the Windows venv and on Ubuntu. The only difference
-is that Windows writes `
-` line endings when the output is redirected to a file.
+is that Windows turns each line break of the report into CRLF when the output is redirected to a
+file. The findings CSV ends every row with CRLF on every host, because `csv.writer` uses that
+terminator by default.
 
 ```
 git clone https://github.com/uhsear/ng911topo.git
@@ -182,7 +185,7 @@ The `usage:` text is cut in this block to its first line. The tool prints the wh
 `--out` must not be an input layer. That is refused with exit 64, on a dry run too. A file that
 already exists is overwritten under `--apply`, with no prompt and no backup. The tool compares
 `--out` with the inputs by resolved path only, so a hard link or a Windows short-name alias of an
-input is not noticed.
+input is not noticed. Do not give `--out` a hard link to an input.
 
 ## The demo files
 
@@ -240,6 +243,7 @@ streets += [street("LANE", [(700, 1), (700, 60)]), street("EDGE-W", [(5, -305), 
 save("streets.geojson", streets)
 save("extent.geojson", [area("EXTENT", box(-20, -310, 1020, 1000))])
 save("elsewhere.geojson", [area("ELSEWHERE", box(50000, 0, 51000, 1000))])
+save("hot.geojson", [area("=SUM(1+1)", box(0, 0, 10, 10)), area("-ZONE-2", box(5, 0, 15, 10))])
 
 
 def reproject(epsg, name):
@@ -560,7 +564,7 @@ What is measured and what is argued:
 | 2 | A file could not be read or written. The message names the file. Any `ValueError` raised inside the analysis, including one from a library, also exits 2. |
 | 3 | The run was refused: a CRS, a geometry or the boundary layer cannot be trusted. Nothing goes to standard output. |
 | 4 | Nothing was compared, or a named layer held no features. When one layer was empty and the other was compared, the report of the other layer prints first, and the exit is 4 even if that layer failed a gate. Neither case is reported as clean. |
-| 64 | Usage error, including an abbreviated flag. |
+| 64 | Usage error, including an abbreviated flag and a threshold that is `nan` or `inf`. |
 | 69 | shapely 2 or pyproj is not installed. |
 | 70 | An unexpected crash. This is a fault in the tool and is never a finding. Output sent to a pipe that closes early, such as `head`, ends here with a traceback. |
 
@@ -644,8 +648,8 @@ check,status,class,key,other,value,x,y,detail
 overlap,reported,overlap,'=SUM(1+1),'-ZONE-2,50.0000,400007.500,3250005.000,'=SUM(1+1)' overlaps '-ZONE-2' by 50.0000 sq m
 ```
 
-`hot.geojson` holds two synthetic squares keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the
-file held `=SUM(1+1)` and `-ZONE-2` as written.
+`hot.geojson` comes from the `mkdemo.py` script above. It holds two 10 m squares offset by 5 m,
+keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as written.
 
 ## Limits
 
@@ -672,9 +676,9 @@ file held `=SUM(1+1)` and `-ZONE-2` as written.
 - An axis-swapped GeoJSON file (latitude first) tagged EPSG:4326 passes, because the area of use of
   4326 is the whole world. The proof cannot catch swapped axes on a world-wide CRS, and areas and
   distances then come out wrong.
-- A threshold given as `nan` or `inf`, such as `--overlap-tol nan` or `--min-gap-width nan`, is
-  accepted. Every comparison is false, so every case is dropped and the run exits 0 with a real
-  overlap suppressed. The gate text still prints the value. Pass finite numbers.
+- A threshold given as `nan` or `inf`, such as `--overlap-tol nan`, is refused with exit 64 before
+  any file is read, because every comparison with `nan` is false and the run would drop every case.
+  A threshold of `0` is allowed.
 - A coordinate of `NaN` or `Infinity` in GeoJSON is not valid JSON, but Python reads it. `Infinity`
   is refused with exit 3 by the area-of-use check. A `NaN` is not refused: a street with an end at
   `(nan, y)` is listed as an INFO isolated dead end and the run exits 0, and a `NaN` in one
@@ -705,11 +709,14 @@ file held `=SUM(1+1)` and `-ZONE-2` as written.
   environment with shapely 2 and pyproj. Python 3.9 was checked in a virtual environment with
   shapely 2.0.7 and pyproj 3.6.1.
 - A MultiLineString becomes one street per part. Z values are dropped.
-- The findings file is written in place, not through a temporary file. A failed write can leave a
+- The findings file is written in place, not through a temporary file. The text is encoded before
+  the file is opened, so a key that UTF-8 cannot hold, such as a lone surrogate (JSON `"\ud800x"`),
+  exits 2 and leaves an existing file untouched. A disk error during the write can still leave a
   partial file, and the exit code is 2.
 - The formula guard covers the six leaders `=`, `+`, `-`, `@`, tab and carriage return. OWASP also
-  lists a line feed and the full-width forms of `=` and `+`. A key that starts with one of those is
-  written as it came. OWASP also notes that its mitigations are not reliable in Excel after the file
+  lists a line feed and the full-width forms of `=`, `+`, `-` and `@`. A key that starts with one of
+  those is written as it came. A key with spaces before a formula leader, such as ` =2+2`, is also
+  written as it came, because a spreadsheet does not treat it as a formula. OWASP also notes that its mitigations are not reliable in Excel after the file
   is saved and opened again. The apostrophe shows in a viewer that does not treat it as a text marker,
   for example a text editor or a script that reads the CSV. A key that already starts with an
   apostrophe is not changed, so the guard cannot be undone exactly.

@@ -866,12 +866,17 @@ def gate_exit(sections):
 
 def write_findings(path, sections):
     """Write every finding, reported or not, so a suppression can be audited."""
-    with io.open(path, "w", encoding="utf-8", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(OUT_COLUMNS)
-        for _, _, findings in sections:
-            for f in findings:
-                w.writerow(f.row())
+    buf = io.StringIO(newline="")
+    w = csv.writer(buf)
+    w.writerow(OUT_COLUMNS)
+    for _, _, findings in sections:
+        for f in findings:
+            w.writerow(f.row())
+    # Encode before opening, so a key that UTF-8 cannot hold (a lone
+    # surrogate) fails with the existing file untouched, not half written.
+    data = buf.getvalue().encode("utf-8")
+    with io.open(path, "wb") as fh:
+        fh.write(data)
 
 
 # --------------------------------------------------------------- self-test
@@ -1684,6 +1689,16 @@ def _self_test(tmp):
           "no text cell of the findings file starts with a formula leader and x and y stay numbers")
     check("overlaps" in out and "'=SUM(1+1)'" in out,
           "the terminal report still shows the key as it came, only the file is guarded")
+    readme_hot = write_json("readme_hot.geojson", [
+        pfeat("=SUM(1+1)", sqp(0, 0)), pfeat("-ZONE-2", sqp(5, 0))])
+    readme_csv = os.path.join(tmp, "readme_hot.csv")
+    code, out, err = run(["--polygons", readme_hot, "--polygons-epsg", "26917",
+                          "--out", readme_csv, "--apply"] + base)
+    with io.open(readme_csv, "r", encoding="utf-8", newline="") as fh:
+        readme_lines = fh.read().split("\r\n")
+    check(code == 1 and readme_lines[1] == "overlap,reported,overlap,'=SUM(1+1),'-ZONE-2,50.0000,"
+          "400007.500,3250005.000,'=SUM(1+1)' overlaps '-ZONE-2' by 50.0000 sq m",
+          "the README hot.csv example is exactly what two 10 m squares offset 5 m, keyed =SUM(1+1) and -ZONE-2, produce")
     hot_streets = write_json("hot_streets.geojson", [
         lfeat("-A", [[BX, BY], [BX + 100, BY]]),
         lfeat("@B", [[BX + 50, BY + 5], [BX + 50, BY + 60]])])
@@ -1865,6 +1880,17 @@ def _self_test(tmp):
           and code2 == 1,
           "--out is refused only when it is an input; with --apply an existing file is overwritten  <-- pinned defect")
 
+    sur = write_json("sur.geojson", [pfeat(u"\ud800x", sqp(0, 0)), pfeat("S", sqp(5, 0))])
+    sur_csv = os.path.join(tmp, "sur.csv")
+    with io.open(sur_csv, "w", encoding="utf-8") as fh:
+        fh.write(u"keep me")
+    code, out, err = run(["--polygons", sur, "--polygons-epsg", "26917",
+                          "--out", sur_csv, "--apply"] + base)
+    with io.open(sur_csv, "r", encoding="utf-8") as fh:
+        kept = fh.read()
+    check(code == 2 and "could not write" in err and kept == "keep me",
+          "a key with a lone surrogate exits 2 and leaves the old findings file untouched, not exit 70 and a partial file  <-- pinned defect")
+
     # ---- the report: how many findings are listed, and which bin is densest
     three = [Finding("overlap", REPORTED, "overlap", "k%d" % n, "", 1.0, 0.0, 0.0, "d")
              for n in range(3)]
@@ -1943,6 +1969,15 @@ def _self_test(tmp):
     check(not accepted(["--min-gap-width", "-1"]) and not accepted(["--snap-tol", "0.05"])
           and not accepted(["--min-boundary-cover", "1.01"]) and not accepted(["--bin", "-1"]),
           "a negative width gate, a snap tolerance equal to the node tolerance and a share over 1 are refused  <-- pinned defect")
+    nonfinite = [["--overlap-tol", "nan"], ["--gap-tol", "nan"], ["--min-gap-width", "nan"],
+                 ["--overlap-tol", "inf"], ["--snap-tol", "inf"], ["--isolated-tol", "nan"],
+                 ["--node-tol", "nan"], ["--bin", "inf"], ["--min-boundary-cover", "nan"]]
+    check(not any(accepted(extra) for extra in nonfinite) and accepted(["--overlap-tol", "0"]),
+          "a threshold of nan or inf is refused at parse time and 0 still passes  <-- pinned defect")
+    code, out, err = run(["--polygons", areas, "--polygons-epsg", "26917",
+                          "--overlap-tol", "nan"] + base)
+    check(code == 64 and out == "" and "finite" in err,
+          "--overlap-tol nan exits 64 and prints no report, not a clean 0 with a real overlap hidden  <-- pinned defect")
     dflt = _parse(pe + base)
     check((dflt.overlap_tol, dflt.gap_tol, dflt.min_gap_width, dflt.snap_tol, dflt.node_tol,
            dflt.min_boundary_cover, dflt.bin, dflt.sample, dflt.key_field,
@@ -2155,6 +2190,12 @@ def _usage_problem(args):
         return "--work-epsg is required: the projected metre CRS to measure in"
     if args.boundary and not args.streets:
         return "--boundary only suppresses street ends, so it needs --streets"
+    numbers = [v for v in (args.overlap_tol, args.gap_tol, args.min_gap_width,
+                           args.snap_tol, args.isolated_tol, args.node_tol,
+                           args.bin, args.min_boundary_cover) if v is not None]
+    if not all(math.isfinite(v) for v in numbers):
+        return ("every threshold must be a finite number. A nan or inf makes "
+                "each comparison false and hides real findings.")
     if args.sample < 0 or args.bin <= 0:
         return "--sample cannot be negative and --bin must be positive"
     if min(args.overlap_tol, args.gap_tol, args.min_gap_width,
@@ -2236,7 +2277,7 @@ def _run(argv):
         if args.apply:
             try:
                 write_findings(args.out, sections)
-            except (IOError, OSError, csv.Error) as exc:
+            except (IOError, OSError, ValueError, csv.Error) as exc:
                 print("error: could not write %s: %s" % (args.out, exc),
                       file=sys.stderr)
                 return EXIT_IO
