@@ -78,8 +78,8 @@ DEFAULT_GAP_TOL = 1.0
 DEFAULT_MIN_GAP_WIDTH = 0.15
 
 # A hole this many times wider than the width gate, ringed by more than one
-# polygon, is called a suspect enclave. Only a hole drawn into one polygon is
-# provably deliberate, and a pocket two zones border looks the same by shape.
+# polygon, is called a suspect enclave. A hole drawn into one polygon is passed
+# as information and is not proved deliberate: a missing zone looks the same.
 ENCLAVE_SUSPECT_MULT = 20.0
 
 # How far a polygon may sit from a hole and still count as bordering it.
@@ -610,10 +610,11 @@ def find_gaps(feats, tol, min_width, mult=ENCLAVE_SUSPECT_MULT):
     """Holes in the dissolved coverage. Returns (findings, info).
 
     Two gates run in turn: area, then mean width. A hole drawn into one
-    polygon, and bordered by no other, is an enclave and passes. A wide hole
-    ringed by several polygons is a suspect enclave and fails, because only
-    the first can be proved. A polygon set into another's hole leaves a ring
-    that both border, so that ring is a gap."""
+    polygon, and bordered by no other, is an enclave. It passes as information
+    and is not proved deliberate, because a missing zone looks the same. A wide
+    hole ringed by several polygons is a suspect enclave and fails. A polygon
+    set into another's hole leaves a ring that both border, so that ring is a
+    gap."""
     geoms = [f.geom for f in feats]
     merged = shapely.unary_union(geoms)
     tree = shapely.STRtree(geoms)
@@ -647,8 +648,9 @@ def find_gaps(feats, tol, min_width, mult=ENCLAVE_SUSPECT_MULT):
         shape = "%.4f sq m, mean width %.4f m" % (area, width)
         if owner is not None:
             add(INFO, "enclave", feats[owner].key, "", p,
-                "%s: a hole drawn into '%s' itself, not ground left between "
-                "polygons" % (shape, feats[owner].key))
+                "%s: a hole drawn into '%s' itself and bordered by no other "
+                "polygon; the tool cannot tell a deliberate cutout from a "
+                "missing zone, so check it" % (shape, feats[owner].key))
             continue
         near = sorted(set(feats[k].key for k in touching))
         listed = ", ".join("'%s'" % k for k in near[:4])
@@ -731,9 +733,10 @@ def classify_dangles(lines, snap, isolated, node_tol, boundary=None):
     within node_tol of another street's body is joined (a T junction) and is
     not a dangle. Then boundary, then fallout (a street within snap), then an
     isolated dead end, which carries the distance to what is nearest. An end
-    outside the boundary layer is suppressed. An end inside it but within snap
-    of its edge is suppressed only when no street is within snap, because a
-    street that near makes it a possible gap the edge must not hide."""
+    more than snap outside the boundary layer is suppressed. An end within snap
+    of the edge, inside or outside, is suppressed only when no street is within
+    snap, because a street that near makes it a possible gap the edge must not
+    hide."""
     ends = endpoints_of(lines)
     pts = [p for _, p in ends]
     tree = shapely.STRtree(pts)
@@ -773,7 +776,11 @@ def classify_dangles(lines, snap, isolated, node_tol, boundary=None):
         if boundary is not None:
             outside = not boundary.covers(p)
             beside = bool(near) and near[0][0] <= snap
-            if outside or (edge.distance(p) <= snap and not beside):
+            at_edge = edge.distance(p) <= snap
+            # Within snap of the edge, either side, a street within snap
+            # keeps the end: a boundary digitized a metre off the true line
+            # must not flip the verdict.
+            if (outside or at_edge) and not (at_edge and beside):
                 counts["boundary"] += 1
                 why = ("end lies outside the boundary layer, so it leaves "
                        "the area" if outside else
@@ -1181,6 +1188,9 @@ def _self_test(tmp):
     check(len(by_cls["enclave"]) == 1 and by_cls["enclave"][0].key == "E"
           and by_cls["enclave"][0].status == INFO,
           "a hole drawn into one polygon and bordered by no other is an enclave and passes the gate")
+    check("cannot tell a deliberate cutout from a missing zone" in by_cls["enclave"][0].detail
+          and "not ground left" not in by_cls["enclave"][0].detail,
+          "the enclave text says the tool cannot tell a cutout from a missing zone and does not claim it is not a gap  <-- pinned defect")
     nested = [f for f in by_cls["suspect-enclave"] if f.key == "N"][0]
     check(abs(nested.value - 96.0) < 1e-6 and nested.status == REPORTED
           and nested.other == "'N', 'n'",
@@ -1358,13 +1368,20 @@ def _self_test(tmp):
     check(at(out, 500, 20).cls == "fallout" and at(out, 500, 20).status == REPORTED
           and at(out, 500, 20).other == "W",
           "an end inside the boundary layer, within the snap tolerance of its edge and of another street, is fallout and fails the gate  <-- pinned defect")
-    out_near, _ = classify([("X", [(950, 1005), (950, 1200)]),
-                            ("Y", [(930, 900), (930, 1002)])],
+    out_near, _ = classify([("X", [(950, 1100), (950, 1200)]),
+                            ("Y", [(930, 1100), (930, 1200)])],
                            snap=30.0, isolated=30.0, boundary=county)
-    check(at(out_near, 950, 1005).cls == "boundary"
-          and "street 'Y' is 20.22 m away" in at(out_near, 950, 1005).detail
+    check(at(out_near, 950, 1100).cls == "boundary"
+          and "street 'Y' is 20.00 m away" in at(out_near, 950, 1100).detail
           and "street" not in at(out, 500, 1100).detail.replace("street ends", ""),
-          "an end outside the boundary layer stays suppressed, and names a street inside the snap tolerance so the hidden gap is visible")
+          "an end well outside the boundary layer stays suppressed, and names a street inside the snap tolerance so the hidden gap is visible")
+    jit = [("A", [(500, 100), (500, 150)]), ("B", [(300, 94), (700, 94)])]
+    jit_in, _ = classify(jit, snap=9.0, isolated=9.0, boundary=box(0, 0, 1000, 101))
+    jit_out, _ = classify(jit, snap=9.0, isolated=9.0, boundary=box(0, 0, 1000, 99))
+    check(at(jit_in, 500, 100).cls == at(jit_out, 500, 100).cls == "fallout"
+          and at(jit_out, 500, 100).status == REPORTED
+          and at(jit_out, 500, 100).other == "B",
+          "a boundary edge moved 2 m across an end with a street 6 m away gives fallout on both sides  <-- pinned defect")
     check(at(out, 800, 505).cls == "fallout" and at(out, 800, 505).status == REPORTED,
           "an interior fallout is not touched by the boundary layer")
     check(at(out, 300, 500).cls == "isolated" and info["counts"]["boundary"] == 4,
@@ -2017,7 +2034,7 @@ def _self_test(tmp):
 
     # ---- a boundary layer is vetted with the snap tolerance
     near_edge = write_json("near_edge.geojson", [
-        sline("S1", [(102, 0), (104, 5)]), sline("S2", [(101, 10), (103, 12)]),
+        sline("S1", [(102, 0), (104, 5)]), sline("S2", [(101, 40), (103, 45)]),
         sline("S3", [(50, 0), (60, 0)])])
     bnd = write_json("bnd.geojson", [pfeat("C", sqp(0, -50, 100, 100))])
     code, out, err = run(["--streets", near_edge, "--streets-epsg", "26917",

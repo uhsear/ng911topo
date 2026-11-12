@@ -50,6 +50,8 @@ PASS  two ends 0.0002 m apart are one node, not two false dangles  <-- pinned de
 ...
 PASS  an end that lands on its own line's body is joined, so a lollipop is not fallout against its neighbour  <-- pinned defect
 ...
+PASS  a boundary edge moved 2 m across an end with a street 6 m away gives fallout on both sides  <-- pinned defect
+...
 PASS  a boundary layer in the wrong place or CRS is refused with both reasons  <-- pinned defect
 ...
 PASS  a geographic layer that still reads as degrees is caught as re-tagged  <-- pinned defect
@@ -75,10 +77,10 @@ PASS  a full run opens no socket, and the guard would have caught one
 PASS  an unexpected exception exits 70, not the 1 that means a gate failed  <-- pinned defect
 ...
 --------------------------------------------------------------------
-278 assertions, 0 failed
+280 assertions, 0 failed
 ```
 
-The full run prints all 278 assertions. Each `...` line above is where this block is cut. The line
+The full run prints all 280 assertions. Each `...` line above is where this block is cut. The line
 that starts with `info:` is a measurement, not an assertion. It is explained in
 [The equivalence argument](#the-equivalence-argument-the-clip-and-the-re-measure).
 
@@ -112,9 +114,9 @@ Python 3.9 or newer, [shapely](https://shapely.readthedocs.io/) 2 or newer, and
 network, no database. The inputs are GeoJSON files, which
 every GIS can export.
 
-The self-test prints 278 assertions on every interpreter below, and each run ends with `278
+The self-test prints 280 assertions on every interpreter below, and each run ends with `280
 assertions, 0 failed`. `coverage run --branch ng911topo.py --self-test` reports 100 percent of
-1348 statements and 284 branches (run on the geo venv row). The count is the same on Windows and
+1354 statements and 284 branches (run on the geo venv row). The count is the same on Windows and
 Linux because the self-test needs shapely and pyproj on both and uses no `arcpy`.
 
 | Host | Python | shapely | pyproj |
@@ -308,7 +310,7 @@ GAPS
     WIDE-E at (402005.00, 3250050.00): 1000.0000 sq m, mean width 9.0909 m: wide uncovered area ringed by 4 polygons ('WIDE-E', 'WIDE-N', 'WIDE-S', 'WIDE-W'). Verify whether it is a deliberate enclave.
     GAP-E at (401001.00, 3250050.00): 200.0000 sq m, mean width 1.9608 m: covered by no polygon; bordered by 'GAP-E', 'GAP-N', 'GAP-S', 'GAP-W'
   INFO (1)
-    RING at (404020.00, 3250020.00): 100.0000 sq m, mean width 5.0000 m: a hole drawn into 'RING' itself, not ground left between polygons
+    RING at (404020.00, 3250020.00): 100.0000 sq m, mean width 5.0000 m: a hole drawn into 'RING' itself and bordered by no other polygon; the tool cannot tell a deliberate cutout from a missing zone, so check it
   SUPPRESSED (1)
     - at (403000.05, 3250050.00): 10.0000 sq m hole, mean width 0.0999 m, is not over the 0.15 m width gate
 exit=1
@@ -324,8 +326,9 @@ What each result means:
   mistake from a deliberate one. It reports a suspect enclave and asks a person to check. A hole
   with a mean width over 20 times the width gate (at least 3 m) that several polygons border is
   never passed silently.
-- `RING` has a hole drawn into the one polygon. The tool treats that case as deliberate and cannot
-  prove it, because an accidental inner ring looks the same. It is listed as information and passes.
+- `RING` has a hole drawn into the one polygon. The tool cannot tell a deliberate cutout from a
+  missing zone, because both look the same. It is listed as information and passes the gate, so a
+  hole left by a missing zone exits 0. Read every `enclave` row.
 - `CRACK-*` leave a hole 0.1 m wide. The width gate dropped it, and the report names its width.
 
 The overlap gate and the width gate each dropped one case in this run. The area gate of the gap
@@ -340,7 +343,7 @@ tool sorts every dangle into one of three classes.
 |---|---|---|
 | `fallout` | REPORTED | The end stops within the snap tolerance of another street and is not joined to it. It fails the gate. |
 | `isolated` | INFO | A dead end. The nearest street is beyond the snap tolerance. It is listed and passes. |
-| `boundary` | SUPPRESSED | The end lies outside the boundary layer, or inside it and within the snap tolerance of its edge with no street within the snap tolerance. An end outside the layer names a street that is within the snap tolerance. |
+| `boundary` | SUPPRESSED | The end lies more than the snap tolerance outside the boundary layer, or within the snap tolerance of its edge on either side with no street within the snap tolerance. An end that is suppressed names a street within the snap tolerance, if there is one. |
 
 The distances of the `fallout` ends go into a histogram, and the busiest bin is marked. Four stubs
 that stop 6.5 to 7.6 m short of one street show up as one bar. A tool that prints a flat list
@@ -718,10 +721,12 @@ keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as wr
 - A key that holds an escape character or a line break is printed to the terminal as it came, so a
   hostile file can clear the screen, set the window title or forge a line that looks like a
   finding. Run the tool on files you trust.
-- A street end that lies outside the boundary layer is SUPPRESSED even when another street is
-  nearer than the snap tolerance. The row names that street, but the run can exit 0 on a real gap
-  next to the edge. An end inside the layer and within the snap tolerance of its edge is suppressed
-  only when no street is within the snap tolerance. Otherwise it is fallout and fails the gate.
+- A street end more than the snap tolerance outside the boundary layer is SUPPRESSED even when
+  another street is nearer than the snap tolerance. The row names that street, but the run can
+  exit 0 on a real gap beyond the edge. An end within the snap tolerance of the edge, inside or
+  outside, is suppressed only when no street is within the snap tolerance. Otherwise it is fallout
+  and fails the gate, so a boundary digitized a metre or two off the true line gives the same
+  verdict on both sides.
   A boundary layer that holds only half of the street ends passes the default check and then
   hides the fallout at the other half. Raise `--min-boundary-cover` for a partial layer.
 - Street ends within `--node-tol` of each other count as one shared node, so a dangling stub of
