@@ -78,8 +78,9 @@ DEFAULT_GAP_TOL = 1.0
 DEFAULT_MIN_GAP_WIDTH = 0.15
 
 # A hole this many times wider than the width gate, ringed by more than one
-# polygon, is called a suspect enclave. A hole drawn into one polygon is passed
-# as information and is not proved deliberate: a missing zone looks the same.
+# polygon, is called a suspect enclave. A hole drawn into one polygon is not
+# proved deliberate either, because a missing zone looks the same. It fails the
+# gate until --allow-enclave says the cutouts are known.
 ENCLAVE_SUSPECT_MULT = 20.0
 
 # How far a polygon may sit from a hole and still count as bordering it.
@@ -606,12 +607,14 @@ def areal_parts(geom):
     return [p for p in shapely.get_parts(geom) if p.area > 0.0]
 
 
-def find_gaps(feats, tol, min_width, mult=ENCLAVE_SUSPECT_MULT):
+def find_gaps(feats, tol, min_width, mult=ENCLAVE_SUSPECT_MULT,
+              allow_enclave=False):
     """Holes in the dissolved coverage. Returns (findings, info).
 
     Two gates run in turn: area, then mean width. A hole drawn into one
-    polygon, and bordered by no other, is an enclave. It passes as information
-    and is not proved deliberate, because a missing zone looks the same. A wide
+    polygon, and bordered by no other, is an enclave. It is not proved
+    deliberate, because a missing zone looks the same, so it fails the gate
+    unless allow_enclave is set, and then it passes as information. A wide
     hole ringed by several polygons is a suspect enclave and fails. A polygon
     set into another's hole leaves a ring that both border, so that ring is a
     gap."""
@@ -647,7 +650,8 @@ def find_gaps(feats, tol, min_width, mult=ENCLAVE_SUSPECT_MULT):
         owner = next(iter(touching)) if len(touching) == 1 else None
         shape = "%.4f sq m, mean width %.4f m" % (area, width)
         if owner is not None:
-            add(INFO, "enclave", feats[owner].key, "", p,
+            add(INFO if allow_enclave else REPORTED, "enclave",
+                feats[owner].key, "", p,
                 "%s: a hole drawn into '%s' itself and bordered by no other "
                 "polygon; the tool cannot tell a deliberate cutout from a "
                 "missing zone, so check it" % (shape, feats[owner].key))
@@ -865,8 +869,9 @@ def overlap_section(feats, tol, eps=CLIP_EPS):
     return ("OVERLAPS", header, findings)
 
 
-def gap_section(feats, tol, min_width):
-    findings, info = find_gaps(feats, tol, min_width)
+def gap_section(feats, tol, min_width, allow_enclave=False):
+    findings, info = find_gaps(feats, tol, min_width,
+                               allow_enclave=allow_enclave)
     header = ["  %d uncovered hole(s) in the dissolved coverage"
               % info["holes"],
               "  only enclosed holes are checked; a strip that reaches the "
@@ -1171,7 +1176,7 @@ def _self_test(tmp):
     cover = (frame("g", 10, 2, 20) + frame("s", 1010, 10, 10)
              + frame("c", 2010, 0.1, 20) + frame("t", 3010, 0.5, 0.5)
              + [("E", ring), ("N", ring2), ("n", box(5019, 19, 5021, 21))])
-    gfound, ginfo = find_gaps(feats_of(cover), 1.0, 0.15)
+    gfound, ginfo = find_gaps(feats_of(cover), 1.0, 0.15, allow_enclave=True)
     by_cls = {}
     for f in gfound:
         by_cls.setdefault(f.cls, []).append(f)
@@ -1187,7 +1192,10 @@ def _self_test(tmp):
           "a wide hole ringed by several polygons is a suspect enclave and fails the gate")
     check(len(by_cls["enclave"]) == 1 and by_cls["enclave"][0].key == "E"
           and by_cls["enclave"][0].status == INFO,
-          "a hole drawn into one polygon and bordered by no other is an enclave and passes the gate")
+          "with allow_enclave, a hole drawn into one polygon and bordered by no other is an enclave and passes the gate")
+    strict = [f for f in find_gaps(feats_of(cover), 1.0, 0.15)[0] if f.cls == "enclave"]
+    check(len(strict) == 1 and strict[0].status == REPORTED and strict[0].key == "E",
+          "by default a hole drawn into one polygon fails the gate, since a missing zone looks the same  <-- pinned defect")
     check("cannot tell a deliberate cutout from a missing zone" in by_cls["enclave"][0].detail
           and "not ground left" not in by_cls["enclave"][0].detail,
           "the enclave text says the tool cannot tell a cutout from a missing zone and does not claim it is not a gap  <-- pinned defect")
@@ -1255,7 +1263,8 @@ def _self_test(tmp):
     check(len(twins) == 1 and twins[0].cls == "gap" and twins[0].other == "'Z'",
           "a wide hole ringed by rows that all share one key is a gap, since only one area can be named")
     walled = shapely.Polygon(box(0, 0, 30, 30).exterior.coords, [box(2, 2, 20, 20).exterior.coords])
-    away = find_gaps(feats_of([("A", walled), ("Z", box(-10, 0, 0, 30))]), 1.0, 0.15)[0]
+    away = find_gaps(feats_of([("A", walled), ("Z", box(-10, 0, 0, 30))]), 1.0, 0.15,
+                     allow_enclave=True)[0]
     check(len(away) == 1 and away[0].cls == "enclave" and away[0].status == INFO,
           "a polygon 2 m from a hole does not border it, so the hole is still an enclave  <-- pinned defect")
 
@@ -2094,6 +2103,46 @@ def _self_test(tmp):
           and (CLIP_EPS, MIN_CLUSTER, ENCLAVE_SUSPECT_MULT, BORDER_PAD, PROOF_TOL, AOU_MARGIN_DEG)
           == (1e-6, 3, 20.0, 0.01, 0.005, 0.1),
           "the default thresholds are the ones the README documents  <-- pinned defect")
+    check(dflt.allow_enclave is False
+          and _parse(pe + ["--allow-enclave"] + base).allow_enclave is True,
+          "--allow-enclave is off by default and on when given")
+    cutout = shapely.Polygon(
+        sqp(0, 0, 100, 100).exterior.coords, [sqp(30, 30, 40, 40).exterior.coords])
+    cut_f = write_json("cutout.geojson", [pfeat("ZONE-A", cutout)])
+    cut_args = ["--polygons", cut_f, "--polygons-epsg", "26917"] + base
+    code, out, err = run(cut_args)
+    check(code == 1 and "REPORTED (1)" in out and "ZONE-A at" in out and "INFO" not in out,
+          "a hole drawn into one polygon exits 1 by default, since a missing zone looks the same  <-- pinned defect")
+    code, out, err = run(cut_args + ["--allow-enclave"])
+    check(code == 0 and "INFO (1)" in out and "REPORTED" not in out,
+          "--allow-enclave lists that hole as information and exits 0")
+    named = write_json("named.geojson", [
+        {"type": "Feature", "properties": {"KEY": "k1", "NAME": "ZONE-1"},
+         "geometry": shapely.geometry.mapping(sqp(0, 0))},
+        {"type": "Feature", "properties": {"KEY": "k2", "NAME": "ZONE-2"},
+         "geometry": shapely.geometry.mapping(sqp(5, 0))}])
+    named_args = ["--polygons", named, "--polygons-epsg", "26917"] + base
+    code, out, err = run(named_args)
+    code2, out2, err2 = run(named_args + ["--key-field", "NAME"])
+    check(code == 1 and "'k1' overlaps 'k2'" in out and "ZONE-1" not in out
+          and code2 == 1 and "'ZONE-1' overlaps 'ZONE-2'" in out2 and "k1" not in out2,
+          "--key-field names the polygons by another property")
+    code, out, err = run(named_args + ["--key-field", "NOPE"])
+    check(code == 1 and "'#0' overlaps '#1'" in out,
+          "a --key-field that matches no property names every polygon by its position and still exits 1")
+    named_st = write_json("named_streets.geojson", [
+        {"type": "Feature", "properties": {"SEGMENT_ID": "s1", "ROAD": "ROAD-1"},
+         "geometry": {"type": "LineString",
+                      "coordinates": [[BX, BY], [BX + 100, BY]]}},
+        {"type": "Feature", "properties": {"SEGMENT_ID": "s2", "ROAD": "ROAD-2"},
+         "geometry": {"type": "LineString",
+                      "coordinates": [[BX + 50, BY + 5], [BX + 50, BY + 60]]}}])
+    st_args = ["--streets", named_st, "--streets-epsg", "26917"] + base
+    code, out, err = run(st_args)
+    code2, out2, err2 = run(st_args + ["--street-key-field", "ROAD"])
+    check(code == 1 and "from 's1'" in out and "ROAD-1" not in out
+          and code2 == 1 and "from 'ROAD-1'" in out2 and "s1" not in out2,
+          "--street-key-field names the streets by another property")
 
     # ---- the tool opens no sockets and does not crash quietly
     real_connect = socket.socket.connect
@@ -2250,6 +2299,10 @@ def _parse(argv):
                     default=DEFAULT_MIN_GAP_WIDTH,
                     help="metres of mean width a hole must exceed "
                          "(default %g)" % DEFAULT_MIN_GAP_WIDTH)
+    ap.add_argument("--allow-enclave", dest="allow_enclave",
+                    action="store_true",
+                    help="list a hole drawn into one polygon as information "
+                         "instead of failing the gate")
     ap.add_argument("--snap-tol", dest="snap_tol", type=float,
                     default=DEFAULT_SNAP_TOL,
                     help="metres within which a street end should have "
@@ -2417,7 +2470,8 @@ def _analyse(args):
         if feats:
             sections.append(overlap_section(feats, args.overlap_tol))
             sections.append(gap_section(feats, args.gap_tol,
-                                        args.min_gap_width))
+                                        args.min_gap_width,
+                                        args.allow_enclave))
         else:
             empty.append("--polygons")
     if args.streets:

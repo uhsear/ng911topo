@@ -1,7 +1,7 @@
 # ng911topo
 
 Find response-area polygons that overlap, enclosed ground that no polygon covers, and street ends
-that stop short of another street. Every threshold is printed, together with what it suppressed and the
+that stop short of another street. Every overlap and gap threshold is printed, together with what it suppressed and the
 nearest case just above it. The tool refuses to run when a boundary layer it was told to use
 cannot be trusted, instead of printing a flood of false findings.
 
@@ -77,10 +77,10 @@ PASS  a full run opens no socket, and the guard would have caught one
 PASS  an unexpected exception exits 70, not the 1 that means a gate failed  <-- pinned defect
 ...
 --------------------------------------------------------------------
-280 assertions, 0 failed
+287 assertions, 0 failed
 ```
 
-The full run prints all 280 assertions. Each `...` line above is where this block is cut. The line
+The full run prints all 287 assertions. Each `...` line above is where this block is cut. The line
 that starts with `info:` is a measurement, not an assertion. It is explained in
 [The equivalence argument](#the-equivalence-argument-the-clip-and-the-re-measure).
 
@@ -94,7 +94,10 @@ shows overlaps in red during validation, and treats vertices within a cluster to
 location. The default cluster tolerance is 10 times the x,y resolution
 ([Topology in ArcGIS](https://doc.esri.com/en/arcgis-pro/latest/help/data/topologies/topology-in-arcgis.html)).
 Both tools are good at this. They show the error on the map, next to the data, and they sit inside
-a GUI project. This tool does none of that.
+a GUI project. This tool does none of that. Esri's
+[Validate Topology](https://doc.esri.com/en/arcgis-pro/latest/tool-reference/data-management/validate-topology.html)
+tool can also run from `arcpy` in a script, but it validates a geodatabase topology and needs an
+ArcGIS licence. This tool reads GeoJSON and needs neither.
 
 What this tool adds is smaller. It is one script that runs in a scheduled job and exits non-zero
 when a gate fails. It prints each threshold with the count it suppressed and the nearest case above
@@ -114,9 +117,9 @@ Python 3.9 or newer, [shapely](https://shapely.readthedocs.io/) 2 or newer, and
 network, no database. The inputs are GeoJSON files, which
 every GIS can export.
 
-The self-test prints 280 assertions on every interpreter below, and each run ends with `280
+The self-test prints 287 assertions on every interpreter below, and each run ends with `287
 assertions, 0 failed`. `coverage run --branch ng911topo.py --self-test` reports 100 percent of
-1354 statements and 284 branches (run on the geo venv row). The count is the same on Windows and
+1377 statements and 284 branches (run on the geo venv row). The count is the same on Windows and
 Linux because the self-test needs shapely and pyproj on both and uses no `arcpy`.
 
 | Host | Python | shapely | pyproj |
@@ -172,6 +175,7 @@ python ng911topo.py --polygons areas.geojson --polygons-epsg 4326 --work-epsg 26
 | `--node-tol` | `0.05` | Metres within which two street ends are one node. Must be under `--snap-tol`. |
 | `--bin` | `2` | Width in metres of one histogram bin. |
 | `--min-boundary-cover` | `0.5` | Share of street ends that must lie inside `--boundary`. |
+| `--allow-enclave` | off | List a hole drawn into one polygon as information. By default it fails the gate. |
 | `--sample` | `10` | Findings listed under each heading. `0` lists none. |
 | `--out` | none | Path of the findings CSV. Needs `--apply` to be written. |
 | `--apply` | off | Write `--out`. Without it nothing is written. |
@@ -306,10 +310,9 @@ GAPS
   width threshold: a case must exceed 0.15 m
   3 over the threshold, 1 suppressed (largest suppressed 0.0999 m)
   nearest case above the threshold: 1.961 m
-  REPORTED (2)
+  REPORTED (3)
     WIDE-E at (402005.00, 3250050.00): 1000.0000 sq m, mean width 9.0909 m: wide uncovered area ringed by 4 polygons ('WIDE-E', 'WIDE-N', 'WIDE-S', 'WIDE-W'). Verify whether it is a deliberate enclave.
     GAP-E at (401001.00, 3250050.00): 200.0000 sq m, mean width 1.9608 m: covered by no polygon; bordered by 'GAP-E', 'GAP-N', 'GAP-S', 'GAP-W'
-  INFO (1)
     RING at (404020.00, 3250020.00): 100.0000 sq m, mean width 5.0000 m: a hole drawn into 'RING' itself and bordered by no other polygon; the tool cannot tell a deliberate cutout from a missing zone, so check it
   SUPPRESSED (1)
     - at (403000.05, 3250050.00): 10.0000 sq m hole, mean width 0.0999 m, is not over the 0.15 m width gate
@@ -327,12 +330,26 @@ What each result means:
   with a mean width over 20 times the width gate (at least 3 m) that several polygons border is
   never passed silently.
 - `RING` has a hole drawn into the one polygon. The tool cannot tell a deliberate cutout from a
-  missing zone, because both look the same. It is listed as information and passes the gate, so a
-  hole left by a missing zone exits 0. Read every `enclave` row.
+  missing zone, because both look the same. It is reported and fails the gate. If the cutouts are
+  known and deliberate, `--allow-enclave` lists them as information and they pass the gate.
 - `CRACK-*` leave a hole 0.1 m wide. The width gate dropped it, and the report names its width.
 
 The overlap gate and the width gate each dropped one case in this run. The area gate of the gap
 check dropped none. Every dropped case has a line in the report.
+
+With `--allow-enclave`, `RING` moves from REPORTED to INFO. The overlap and the other gaps still
+fail the gate, so this run also exits 1:
+
+```
+$ python ng911topo.py --polygons areas.geojson --polygons-epsg 26917 --work-epsg 26917 --allow-enclave --sample 0 | grep -A1 -e REPORTED -e INFO
+  REPORTED (1)
+    ... 1 more; --out lists them all
+--
+  REPORTED (2)
+    ... 2 more; --out lists them all
+  INFO (1)
+    ... 1 more; --out lists them all
+```
 
 ## Street ends that stop short (snapgap)
 
@@ -626,10 +643,8 @@ GAPS
   width threshold: a case must exceed 0.15 m
   3 over the threshold, 1 suppressed (largest suppressed 0.0999 m)
   nearest case above the threshold: 1.961 m
-  REPORTED (2)
-    ... 2 more; --out lists them all
-  INFO (1)
-    ... 1 more; --out lists them all
+  REPORTED (3)
+    ... 3 more; --out lists them all
   SUPPRESSED (1)
     ... 1 more; --out lists them all
 
@@ -650,7 +665,7 @@ overlap,reported,overlap,ZONE-1,ZONE-2,1000.0000,400095.000,3250050.000,'ZONE-1'
 overlap,suppressed,overlap,ZONE-4,ZONE-5,0.5000,400399.997,3250050.000,'ZONE-4' overlaps 'ZONE-5' by 0.5000 sq
 gap,reported,suspect-enclave,WIDE-E,"'WIDE-E', 'WIDE-N', 'WIDE-S', 'WIDE-W'",1000.0000,402005.000,3250050.000,
 gap,reported,gap,GAP-E,"'GAP-E', 'GAP-N', 'GAP-S', 'GAP-W'",200.0000,401001.000,3250050.000,"200.0000 sq m, me
-gap,info,enclave,RING,,100.0000,404020.000,3250020.000,"100.0000 sq m, mean width 5.0000 m: a hole drawn into 
+gap,reported,enclave,RING,,100.0000,404020.000,3250020.000,"100.0000 sq m, mean width 5.0000 m: a hole drawn into 
 gap,suppressed,narrow,,,10.0000,403000.050,3250050.000,"10.0000 sq m hole, mean width 0.0999 m, is not over th
 ```
 
@@ -696,8 +711,15 @@ keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as wr
   as "no uncovered ground".
 - The default thresholds are starting values for a metre CRS, not measurements. Measure your own
   layers. The nearest case above each gate is printed so that you can.
-- A hole that is drawn into one polygon is treated as deliberate. A wide hole ringed by several
-  polygons is a suspect, and the tool cannot tell more than that.
+- A hole that is drawn into one polygon fails the gate until `--allow-enclave` is given. With the
+  flag it is listed as information and the run can exit 0 on a zone that someone forgot to draw. A
+  wide hole ringed by several polygons is a suspect, and the tool cannot tell more than that.
+- A legacy GeoJSON `crs` member written as an OGC URL, such as
+  `http://www.opengis.net/def/crs/EPSG/0/26917`, is refused with exit 3 although it is valid. Only
+  the `EPSG:NNNN`, `urn:ogc:def:crs:EPSG::NNNN` and `CRS84` spellings are read. The tool never
+  fetches the URL.
+- The apostrophe guard was verified by reading the CSV back, not by opening it in a spreadsheet.
+  The README does not claim how Excel shows it.
 - The reprojection proof covers units. It does not prove the datum shift.
 - The tool checks the CRS tag by area of use and by unit scale only. A layer in metres that is
   tagged with a feet CRS passes both checks if its coordinates fall inside the area of use of that
