@@ -473,6 +473,15 @@ def raw_features(doc, path):
     return feats
 
 
+def nonfinite_in(node):
+    """True when a nested GeoJSON coordinate list holds a nan or infinite
+    number. shapely cannot build a ring whose closing vertex is nan, so this
+    names the real cause before the generic build error."""
+    if isinstance(node, (list, tuple)):
+        return any(nonfinite_in(n) for n in node)
+    return isinstance(node, float) and not math.isfinite(node)
+
+
 def build_feats(raw, kind, key_field, label):
     """Turn feature dicts into Feat objects. kind is 'polygon' or 'line'.
     A feature with no geometry is counted, never hidden. A polygon that is
@@ -485,6 +494,11 @@ def build_feats(raw, kind, key_field, label):
         try:
             geom = shapely.force_2d(shapely.geometry.shape(f["geometry"]))
         except Exception as exc:
+            shape = f["geometry"]
+            if nonfinite_in(shape.get("coordinates") if isinstance(shape, dict) else None):
+                raise Refusal("%s: feature %d has a coordinate that is nan or "
+                              "infinite, so no area or distance can be "
+                              "measured from it" % (label, i))
             raise ValueError("%s: feature %d has a geometry shapely cannot "
                              "build: %s" % (label, i, exc))
         if geom.is_empty:
@@ -1510,7 +1524,7 @@ def _self_test(tmp):
     check(not ok, "a geographic layer moved by less than a degree is still degree-like")
 
     # ---- the reprojection, end to end, built by PROJ and proved back
-    utm = [(400000.0, 3250000.0), (400800.0, 3250000.0), (400800.0, 3250600.0)]
+    utm = [(290000.0, 3040000.0), (290800.0, 3040000.0), (290800.0, 3040600.0)]
     to_ft = pyproj.Transformer.from_crs(26917, 2237, always_xy=True)
     to_geo = pyproj.Transformer.from_crs(26917, 4269, always_xy=True)
     ft = [to_ft.transform(x, y) for x, y in utm]
@@ -1562,7 +1576,7 @@ def _self_test(tmp):
     check("is the work CRS, but" in why and "scale ratio is 1.1" in why and "Web Mercator" in why,
           "a layer tagged Web Mercator with Web Mercator as the work CRS is refused, not measured 1.32 times too large  <-- pinned defect")
     got, note = convert_layer(line_utm, work, work, "same-scale")
-    check("scale ratio 0.9997" in note and "geodesic distance" in note,
+    check("scale ratio 1.0001" in note and "geodesic distance" in note,
           "a layer in the work CRS passes only after its scale is proved against the geodesic distance  <-- pinned defect")
     ok, why = prove_work_scale(0.0, 0.0)
     check(not ok and "cannot be proved" in why,
@@ -1586,7 +1600,7 @@ def _self_test(tmp):
     check("unchecked" in note, "a CRS with no area of use still reprojects and notes the unchecked tag")
     line_geo = [Feat(0, "L", shapely.LineString(geo))]
     got, note = convert_layer(line_geo, f4269, work, "deg")
-    check("scale ratio 0.9997" in note and "geodesic distance" in note,
+    check("scale ratio 1.0001" in note and "geodesic distance" in note,
           "a layer in degrees is proved by its scale against the geodesic distance  <-- pinned defect")
     why = ""
     try:
@@ -1731,7 +1745,7 @@ def _self_test(tmp):
           "write_findings puts the apostrophe in the file for a tab and a CR key, and the file reads back as one row")
 
     # ---- the CLI, end to end
-    BX, BY = 400000.0, 3250000.0
+    BX, BY = 290000.0, 3040000.0
 
     def sqp(x, y, w=10.0, hgt=10.0):
         return box(BX + x, BY + y, BX + x + w, BY + y + hgt)
@@ -1799,7 +1813,7 @@ def _self_test(tmp):
     with io.open(readme_csv, "r", encoding="utf-8", newline="") as fh:
         readme_lines = fh.read().split("\r\n")
     check(code == 1 and readme_lines[1] == "overlap,reported,overlap,'=SUM(1+1),'-ZONE-2,50.0000,"
-          "400007.500,3250005.000,'=SUM(1+1)' overlaps '-ZONE-2' by 50.0000 sq m",
+          "290007.500,3040005.000,'=SUM(1+1)' overlaps '-ZONE-2' by 50.0000 sq m",
           "the README hot.csv example is exactly what two 10 m squares offset 5 m, keyed =SUM(1+1) and -ZONE-2, produce")
     hot_streets = write_json("hot_streets.geojson", [
         lfeat("-A", [[BX, BY], [BX + 100, BY]]),
@@ -1864,8 +1878,8 @@ def _self_test(tmp):
     code, out, err = run(["--polygons", ll, "--polygons-epsg", "4326", "--work-epsg", "3857"])
     check(code == 3 and out == "" and "Web Mercator" in err,
           "degree polygons are refused under Web Mercator and nothing is printed  <-- pinned defect")
-    merc_sq = [pfeat("A", shapely.ops.transform(to_merc.transform, box(400000.0, 3250000.0, 400010.0, 3250010.0))),
-               pfeat("B", shapely.ops.transform(to_merc.transform, box(400009.0, 3250000.0, 400020.0, 3250010.0)))]
+    merc_sq = [pfeat("A", shapely.ops.transform(to_merc.transform, box(290000.0, 3040000.0, 290010.0, 3040010.0))),
+               pfeat("B", shapely.ops.transform(to_merc.transform, box(290009.0, 3040000.0, 290020.0, 3040010.0)))]
     merc_same = write_json("merc_same.geojson", merc_sq)
     code, out, err = run(["--polygons", merc_same, "--polygons-epsg", "3857", "--work-epsg", "3857"])
     check(code == 3 and out == "" and "Web Mercator" in err and "is the work CRS, but" in err,
@@ -1978,6 +1992,16 @@ def _self_test(tmp):
     code, out, err = run(["--streets", nan_st, "--streets-epsg", "26917"] + base)
     check(code == 3 and out == "" and "nan or infinite" in err,
           "a street with a nan coordinate is refused, not listed as a clean dead end with exit 0  <-- pinned defect")
+    nan_ring = write_json("nan_ring.geojson", [pfeat("N", box(BX, BY, BX + 10, BY + 10))])
+    with io.open(nan_ring, "r", encoding="utf-8") as fh:
+        ring_doc = json.load(fh)
+    ring_pts = ring_doc["features"][0]["geometry"]["coordinates"][0]
+    ring_pts[0][0] = ring_pts[-1][0] = float("nan")
+    with io.open(nan_ring, "w", encoding="utf-8") as fh:
+        json.dump(ring_doc, fh)
+    code, out, err = run(["--polygons", nan_ring, "--polygons-epsg", "26917"] + base)
+    check(code == 3 and out == "" and "nan or infinite" in err,
+          "a polygon whose closing vertex is nan is refused with exit 3, not exit 2 as a shapely build error  <-- pinned defect")
     inf_st = write_json("inf_st.geojson", [lfeat("I1", [[BX, BY], [float("inf"), BY + 50]])])
     code, out, err = run(["--streets", inf_st, "--streets-epsg", "26917"] + base)
     check(code == 3 and out == "" and "nan or infinite" in err,

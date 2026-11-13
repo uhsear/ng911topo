@@ -71,16 +71,18 @@ PASS  polygons tagged 3857 under work CRS 3857 are refused and nothing is printe
 PASS  a boundary layer that cannot be read exits 2 and prints no findings, where the unguarded run printed them  <-- pinned defect
 PASS  a boundary layer in the wrong place is refused with no findings printed  <-- pinned defect
 ...
+PASS  a polygon whose closing vertex is nan is refused with exit 3, not exit 2 as a shapely build error  <-- pinned defect
+...
 PASS  --overlap-tol nan exits 64 and prints no report, not a clean 0 with a real overlap hidden  <-- pinned defect
 ...
 PASS  a full run opens no socket, and the guard would have caught one
 PASS  an unexpected exception exits 70, not the 1 that means a gate failed  <-- pinned defect
 ...
 --------------------------------------------------------------------
-287 assertions, 0 failed
+288 assertions, 0 failed
 ```
 
-The full run prints all 287 assertions. Each `...` line above is where this block is cut. The line
+The full run prints all 288 assertions. Each `...` line above is where this block is cut. The line
 that starts with `info:` is a measurement, not an assertion. It is explained in
 [The equivalence argument](#the-equivalence-argument-the-clip-and-the-re-measure).
 
@@ -117,9 +119,9 @@ Python 3.9 or newer, [shapely](https://shapely.readthedocs.io/) 2 or newer, and
 network, no database. The inputs are GeoJSON files, which
 every GIS can export.
 
-The self-test prints 287 assertions on every interpreter below, and each run ends with `287
+The self-test prints 288 assertions on every interpreter below, and each run ends with `288
 assertions, 0 failed`. `coverage run --branch ng911topo.py --self-test` reports 100 percent of
-1377 statements and 284 branches (run on the geo venv row). The count is the same on Windows and
+1393 statements and 288 branches (run on the geo venv row). The count is the same on Windows and
 Linux. The self-test needs shapely and pyproj on both and uses no `arcpy`.
 
 | Host | Python | shapely | pyproj |
@@ -135,9 +137,9 @@ first.
 
 The demo runs below produce the same text on the Windows venv and on Ubuntu, with two differences.
 Windows turns each line break of the report into CRLF when the output is redirected to a file. The
-reprojection line of the EPSG:4326 streets example (`scale ratio` and `PROJ accuracy`) also differs
-between the two hosts with the same pyproj 3.8.0 and shapely 2.1.2: Windows prints `0.99973` and
-`-1.0`, and Ubuntu prints `0.99972` and `4.0`. The block below shows the Windows values. The
+reprojection line of the EPSG:4326 streets example (`PROJ accuracy`) also differs
+between the two hosts with the same pyproj 3.8.0 and shapely 2.1.2: Windows prints
+`-1.0`, and Ubuntu prints `4.0`. The block below shows the Windows values. The
 cause was not traced. Neither value changes a verdict. The findings CSV ends every row with CRLF on every host, because `csv.writer` uses that
 terminator by default.
 
@@ -171,7 +173,7 @@ python ng911topo.py --polygons areas.geojson --polygons-epsg 4326 --work-epsg 26
 | `--gap-tol` | `1` | Square metres an uncovered hole must exceed. |
 | `--min-gap-width` | `0.15` | Metres of mean width a hole must exceed. |
 | `--snap-tol` | `9` | Metres within which a street end should have snapped. About 30 feet. |
-| `--isolated-tol` | the snap tolerance | Metres searched before a dead end is called isolated. |
+| `--isolated-tol` | the snap tolerance | Metres searched before a dead end is called isolated. A value below `--snap-tol` is refused with exit 64. |
 | `--node-tol` | `0.05` | Metres within which two street ends are one node. Must be under `--snap-tol`. |
 | `--bin` | `2` | Width in metres of one histogram bin. |
 | `--min-boundary-cover` | `0.5` | Share of street ends that must lie inside `--boundary`. |
@@ -215,7 +217,7 @@ import pyproj
 import shapely
 from shapely.geometry import Polygon, box, mapping
 
-BX, BY = 400000.0, 3250000.0
+BX, BY = 290000.0, 3040000.0
 
 
 def save(name, features):
@@ -289,7 +291,7 @@ For a long thin strip it is close to the strip's width. The demo layer has 18 sy
 
 ```
 $ python ng911topo.py --polygons areas.geojson --polygons-epsg 26917 --work-epsg 26917
-areas.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 0.9997 against the geodesic distance
+areas.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 1.0001 against the geodesic distance
 
 OVERLAPS
   18 polygon(s), 15 intersecting pair(s) compared
@@ -298,9 +300,9 @@ OVERLAPS
   nearest case above the threshold: 1000 sq m
   0 pair(s) within 1e-06 sq m of the threshold were measured again on the uncut polygons
   REPORTED (1)
-    ZONE-1 at (400095.00, 3250050.00): 'ZONE-1' overlaps 'ZONE-2' by 1000.0000 sq m
+    ZONE-1 at (290095.00, 3040050.00): 'ZONE-1' overlaps 'ZONE-2' by 1000.0000 sq m
   SUPPRESSED (1)
-    ZONE-4 at (400400.00, 3250050.00): 'ZONE-4' overlaps 'ZONE-5' by 0.5000 sq m
+    ZONE-4 at (290400.00, 3040050.00): 'ZONE-4' overlaps 'ZONE-5' by 0.5000 sq m
 
 GAPS
   4 uncovered hole(s) in the dissolved coverage
@@ -312,11 +314,11 @@ GAPS
   3 over the threshold, 1 suppressed (largest suppressed 0.0999 m)
   nearest case above the threshold: 1.961 m
   REPORTED (3)
-    WIDE-E at (402005.00, 3250050.00): 1000.0000 sq m, mean width 9.0909 m: wide uncovered area ringed by 4 polygons ('WIDE-E', 'WIDE-N', 'WIDE-S', 'WIDE-W'). Verify whether it is a deliberate enclave.
-    GAP-E at (401001.00, 3250050.00): 200.0000 sq m, mean width 1.9608 m: covered by no polygon; bordered by 'GAP-E', 'GAP-N', 'GAP-S', 'GAP-W'
-    RING at (404020.00, 3250020.00): 100.0000 sq m, mean width 5.0000 m: a hole drawn into 'RING' itself and bordered by no other polygon; the tool cannot tell a deliberate cutout from a missing zone, so check it
+    WIDE-E at (292005.00, 3040050.00): 1000.0000 sq m, mean width 9.0909 m: wide uncovered area ringed by 4 polygons ('WIDE-E', 'WIDE-N', 'WIDE-S', 'WIDE-W'). Verify whether it is a deliberate enclave.
+    GAP-E at (291001.00, 3040050.00): 200.0000 sq m, mean width 1.9608 m: covered by no polygon; bordered by 'GAP-E', 'GAP-N', 'GAP-S', 'GAP-W'
+    RING at (294020.00, 3040020.00): 100.0000 sq m, mean width 5.0000 m: a hole drawn into 'RING' itself and bordered by no other polygon; the tool cannot tell a deliberate cutout from a missing zone, so check it
   SUPPRESSED (1)
-    - at (403000.05, 3250050.00): 10.0000 sq m hole, mean width 0.0999 m, is not over the 0.15 m width gate
+    - at (293000.05, 3040050.00): 10.0000 sq m hole, mean width 0.0999 m, is not over the 0.15 m width gate
 exit=1
 ```
 
@@ -375,7 +377,7 @@ such as a P-shaped cul-de-sac drawn as one line.
 
 ```
 $ python ng911topo.py --streets streets.geojson --streets-epsg 26917 --work-epsg 26917 --sample 4
-streets.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 0.9997 against the geodesic distance
+streets.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 1.0001 against the geodesic distance
 
 SNAPGAP
   8 street(s), 16 end(s): 0 shared by another street, 0 joined to a street body, 0 on or beyond the boundary, 16 dangling
@@ -385,16 +387,16 @@ SNAPGAP
        0.0 -    2.0 m    1  #
        6.0 -    8.0 m    4  ####  <-- densest
   REPORTED (5)
-    LANE at (400700.00, 3250001.00): end stops 1.00 m from 'MAIN' and is not joined to it
-    STUB-1 at (400100.00, 3250006.50): end stops 6.50 m from 'MAIN' and is not joined to it
-    STUB-2 at (400200.00, 3250007.00): end stops 7.00 m from 'MAIN' and is not joined to it
-    STUB-3 at (400300.00, 3250007.20): end stops 7.20 m from 'MAIN' and is not joined to it
+    LANE at (290700.00, 3040001.00): end stops 1.00 m from 'MAIN' and is not joined to it
+    STUB-1 at (290100.00, 3040006.50): end stops 6.50 m from 'MAIN' and is not joined to it
+    STUB-2 at (290200.00, 3040007.00): end stops 7.00 m from 'MAIN' and is not joined to it
+    STUB-3 at (290300.00, 3040007.20): end stops 7.20 m from 'MAIN' and is not joined to it
     ... 1 more; --out lists them all
   INFO (11)
-    MAIN at (400000.00, 3250000.00): isolated dead end, nothing within 9 m
-    MAIN at (401000.00, 3250000.00): isolated dead end, nothing within 9 m
-    STUB-1 at (400100.00, 3250050.00): isolated dead end, nothing within 9 m
-    STUB-2 at (400200.00, 3250050.00): isolated dead end, nothing within 9 m
+    MAIN at (290000.00, 3040000.00): isolated dead end, nothing within 9 m
+    MAIN at (291000.00, 3040000.00): isolated dead end, nothing within 9 m
+    STUB-1 at (290100.00, 3040050.00): isolated dead end, nothing within 9 m
+    STUB-2 at (290200.00, 3040050.00): isolated dead end, nothing within 9 m
     ... 7 more; --out lists them all
 exit=1
 ```
@@ -405,8 +407,8 @@ The second is an end beyond it:
 
 ```
 $ python ng911topo.py --streets streets.geojson --streets-epsg 26917 --boundary extent.geojson --boundary-epsg 26917 --work-epsg 26917 --sample 4
-streets.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 0.9997 against the geodesic distance
-extent.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 0.9997 against the geodesic distance
+streets.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 1.0001 against the geodesic distance
+extent.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 1.0001 against the geodesic distance
 
 SNAPGAP
   8 street(s), 16 end(s): 0 shared by another street, 0 joined to a street body, 2 on or beyond the boundary, 14 dangling
@@ -415,20 +417,20 @@ SNAPGAP
        0.0 -    2.0 m    1  #
        6.0 -    8.0 m    4  ####  <-- densest
   REPORTED (5)
-    LANE at (400700.00, 3250001.00): end stops 1.00 m from 'MAIN' and is not joined to it
-    STUB-1 at (400100.00, 3250006.50): end stops 6.50 m from 'MAIN' and is not joined to it
-    STUB-2 at (400200.00, 3250007.00): end stops 7.00 m from 'MAIN' and is not joined to it
-    STUB-3 at (400300.00, 3250007.20): end stops 7.20 m from 'MAIN' and is not joined to it
+    LANE at (290700.00, 3040001.00): end stops 1.00 m from 'MAIN' and is not joined to it
+    STUB-1 at (290100.00, 3040006.50): end stops 6.50 m from 'MAIN' and is not joined to it
+    STUB-2 at (290200.00, 3040007.00): end stops 7.00 m from 'MAIN' and is not joined to it
+    STUB-3 at (290300.00, 3040007.20): end stops 7.20 m from 'MAIN' and is not joined to it
     ... 1 more; --out lists them all
   INFO (9)
-    MAIN at (400000.00, 3250000.00): isolated dead end, nothing within 9 m
-    MAIN at (401000.00, 3250000.00): isolated dead end, nothing within 9 m
-    STUB-1 at (400100.00, 3250050.00): isolated dead end, nothing within 9 m
-    STUB-2 at (400200.00, 3250050.00): isolated dead end, nothing within 9 m
+    MAIN at (290000.00, 3040000.00): isolated dead end, nothing within 9 m
+    MAIN at (291000.00, 3040000.00): isolated dead end, nothing within 9 m
+    STUB-1 at (290100.00, 3040050.00): isolated dead end, nothing within 9 m
+    STUB-2 at (290200.00, 3040050.00): isolated dead end, nothing within 9 m
     ... 5 more; --out lists them all
   SUPPRESSED (2)
-    EDGE-W at (400005.00, 3249695.00): end lies within 9 m of the boundary edge, so it is taken to leave the area
-    OUT at (400900.00, 3251100.00): end lies outside the boundary layer, so it leaves the area
+    EDGE-W at (290005.00, 3039695.00): end lies within 9 m of the boundary edge, so it is taken to leave the area
+    OUT at (290900.00, 3041100.00): end lies outside the boundary layer, so it leaves the area
 exit=1
 ```
 
@@ -495,7 +497,7 @@ proof:
 
 ```
 $ python ng911topo.py --streets streets_ft.geojson --streets-epsg 2237 --work-epsg 26917 --sample 1
-streets_ft.geojson: EPSG:2237 -> EPSG:26917, scale ratio 0.99978 against the unit of the input; PROJ accuracy 0.0 (-1 means unknown)
+streets_ft.geojson: EPSG:2237 -> EPSG:26917, scale ratio 1.00005 against the unit of the input; PROJ accuracy 0.0 (-1 means unknown)
 
 SNAPGAP
   8 street(s), 16 end(s): 0 shared by another street, 0 joined to a street body, 0 on or beyond the boundary, 16 dangling
@@ -505,10 +507,10 @@ SNAPGAP
        0.0 -    2.0 m    1  #
        6.0 -    8.0 m    4  ####  <-- densest
   REPORTED (5)
-    LANE at (400700.00, 3250001.00): end stops 1.00 m from 'MAIN' and is not joined to it
+    LANE at (290700.00, 3040001.00): end stops 1.00 m from 'MAIN' and is not joined to it
     ... 4 more; --out lists them all
   INFO (11)
-    MAIN at (400000.00, 3250000.00): isolated dead end, nothing within 9 m
+    MAIN at (290000.00, 3040000.00): isolated dead end, nothing within 9 m
     ... 10 more; --out lists them all
 exit=1
 ```
@@ -518,7 +520,7 @@ geodesic distance. This block shows only the note line, and the tool prints the 
 
 ```
 $ python ng911topo.py --streets streets_ll.geojson --streets-epsg 4326 --work-epsg 26917 --sample 1
-streets_ll.geojson: EPSG:4326 -> EPSG:26917, output is no longer degree-like; scale ratio 0.99973 against the geodesic distance; PROJ accuracy -1.0 (-1 means unknown)
+streets_ll.geojson: EPSG:4326 -> EPSG:26917, output is no longer degree-like; scale ratio 1.00014 against the geodesic distance; PROJ accuracy -1.0 (-1 means unknown)
 ...
 ```
 
@@ -527,13 +529,13 @@ wrong. At this latitude Web Mercator reads a distance 15 percent long:
 
 ```
 $ python ng911topo.py --streets streets_ll.geojson --streets-epsg 4326 --work-epsg 3857
-refused: streets_ll.geojson: the scale ratio is 1.15024 against the geodesic distance where a metre CRS at this place says 1; the work CRS is not metre-scale here (Web Mercator, EPSG:3857, is not, and a UTM zone far from the data is not). Name a projected CRS for this place
+refused: streets_ll.geojson: the scale ratio is 1.12998 against the geodesic distance where a metre CRS at this place says 1; the work CRS is not metre-scale here (Web Mercator, EPSG:3857, is not, and a UTM zone far from the data is not). Name a projected CRS for this place
 exit=3
 ```
 
 ```
 $ python ng911topo.py --streets streets_ll.geojson --streets-epsg 4326 --work-epsg 26910
-refused: streets_ll.geojson: the data spans lon -82.03..-82.02, lat 29.37..29.39, outside the area of use of the work CRS EPSG:26910 (lon -126.00..-119.99, lat 30.54..81.80). Name a work CRS that covers the data.
+refused: streets_ll.geojson: the data spans lon -83.13..-83.12, lat 27.46..27.48, outside the area of use of the work CRS EPSG:26910 (lon -126.00..-119.99, lat 30.54..81.80). Name a work CRS that covers the data.
 exit=3
 ```
 
@@ -542,7 +544,7 @@ CRS, because the check does not depend on a transform having happened:
 
 ```
 $ python ng911topo.py --streets streets_merc.geojson --streets-epsg 3857 --work-epsg 3857
-refused: streets_merc.geojson: EPSG:3857 is the work CRS, but the scale ratio is 1.15024 against the geodesic distance where a metre CRS at this place says 1; the work CRS is not metre-scale here (Web Mercator, EPSG:3857, is not). Name a projected CRS for this place
+refused: streets_merc.geojson: EPSG:3857 is the work CRS, but the scale ratio is 1.12998 against the geodesic distance where a metre CRS at this place says 1; the work CRS is not metre-scale here (Web Mercator, EPSG:3857, is not). Name a projected CRS for this place
 exit=3
 ```
 
@@ -550,7 +552,7 @@ The metre file, tagged as feet, is refused:
 
 ```
 $ python ng911topo.py --streets streets.geojson --streets-epsg 2237 --work-epsg 26917
-refused: streets.geojson: the data spans lon -82.84..-82.83, lat 33.27..33.27, outside the area of use of its CRS (lon -83.34..-81.13, lat 26.27..29.60). The EPSG tag is probably wrong.
+refused: streets.geojson: the data spans lon -83.19..-83.19, lat 32.69..32.69, outside the area of use of its CRS (lon -83.34..-81.13, lat 26.27..29.60). The EPSG tag is probably wrong.
 exit=3
 ```
 
@@ -622,7 +624,7 @@ Without `--apply` the tool prints `Check only` and writes nothing.
 
 ```
 $ python ng911topo.py --polygons areas.geojson --polygons-epsg 26917 --work-epsg 26917 --out findings.csv --sample 0
-areas.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 0.9997 against the geodesic distance
+areas.geojson: EPSG:26917 is the work CRS, not transformed; scale ratio 1.0001 against the geodesic distance
 
 OVERLAPS
   18 polygon(s), 15 intersecting pair(s) compared
@@ -662,12 +664,12 @@ wrote findings.csv
 ```
 $ cat findings.csv (first 110 columns)
 check,status,class,key,other,value,x,y,detail
-overlap,reported,overlap,ZONE-1,ZONE-2,1000.0000,400095.000,3250050.000,'ZONE-1' overlaps 'ZONE-2' by 1000.000
-overlap,suppressed,overlap,ZONE-4,ZONE-5,0.5000,400399.997,3250050.000,'ZONE-4' overlaps 'ZONE-5' by 0.5000 sq
-gap,reported,suspect-enclave,WIDE-E,"'WIDE-E', 'WIDE-N', 'WIDE-S', 'WIDE-W'",1000.0000,402005.000,3250050.000,
-gap,reported,gap,GAP-E,"'GAP-E', 'GAP-N', 'GAP-S', 'GAP-W'",200.0000,401001.000,3250050.000,"200.0000 sq m, me
-gap,reported,enclave,RING,,100.0000,404020.000,3250020.000,"100.0000 sq m, mean width 5.0000 m: a hole drawn into 
-gap,suppressed,narrow,,,10.0000,403000.050,3250050.000,"10.0000 sq m hole, mean width 0.0999 m, is not over th
+overlap,reported,overlap,ZONE-1,ZONE-2,1000.0000,290095.000,3040050.000,'ZONE-1' overlaps 'ZONE-2' by 1000.000
+overlap,suppressed,overlap,ZONE-4,ZONE-5,0.5000,290399.997,3040050.000,'ZONE-4' overlaps 'ZONE-5' by 0.5000 sq
+gap,reported,suspect-enclave,WIDE-E,"'WIDE-E', 'WIDE-N', 'WIDE-S', 'WIDE-W'",1000.0000,292005.000,3040050.000,
+gap,reported,gap,GAP-E,"'GAP-E', 'GAP-N', 'GAP-S', 'GAP-W'",200.0000,291001.000,3040050.000,"200.0000 sq m, me
+gap,reported,enclave,RING,,100.0000,294020.000,3040020.000,"100.0000 sq m, mean width 5.0000 m: a hole drawn into 
+gap,suppressed,narrow,,,10.0000,293000.050,3040050.000,"10.0000 sq m hole, mean width 0.0999 m, is not over th
 ```
 
 The columns are `check`, `status`, `class`, `key`, `other`, `value`, `x`, `y` and `detail`. The `x`
@@ -688,7 +690,7 @@ shows the key as it came. The tool never reads its own CSV back, so nothing stri
 $ python ng911topo.py --polygons hot.geojson --polygons-epsg 26917 --work-epsg 26917 --out hot.csv --apply
 $ cat hot.csv
 check,status,class,key,other,value,x,y,detail
-overlap,reported,overlap,'=SUM(1+1),'-ZONE-2,50.0000,400007.500,3250005.000,'=SUM(1+1)' overlaps '-ZONE-2' by 50.0000 sq m
+overlap,reported,overlap,'=SUM(1+1),'-ZONE-2,50.0000,290007.500,3040005.000,'=SUM(1+1)' overlaps '-ZONE-2' by 50.0000 sq m
 ```
 
 `hot.geojson` comes from the `mkdemo.py` script above. It holds two 10 m squares offset by 5 m,
@@ -702,8 +704,12 @@ keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as wr
   against the demo layers.
 - The Requirements table records the versions of the original runs. A fresh Linux install today
   gets shapely 2.2.0, which prints the deprecation warning described below. The self-test still
-  prints 287 assertions, 0 failed.
-- The demo coordinates are synthetic but fall inside a real US county.
+  prints 288 assertions, 0 failed.
+- The demo coordinates are synthetic. The origin (EPSG:26917 easting 290000, northing 3040000) lies over
+  open water in the Gulf of Mexico. A foot-CRS example needs an origin inside the area of use of EPSG:2237,
+  so the origin cannot move far from there.
+- The supported branch is `main`. The remote branch `wip/2026-10-30-r1e` holds a work-in-progress commit
+  whose message says the self-test fails, so a checkout of that branch gives a red tool.
 - Commit messages in the history of this repo refer to an internal rule id. The code and this
   README do not.
 - A GeoJSON `crs` member of type `link` is refused with exit 3. Only `name` members are read.
@@ -746,7 +752,8 @@ keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as wr
   any file is read, because every comparison with `nan` is false and the run would drop every case.
   A threshold of `0` is allowed.
 - A coordinate of `NaN` or `Infinity` in GeoJSON is not valid JSON, but Python reads it. Either one
-  is refused with exit 3 and a message that names the layer, before any distance is measured. A
+  is refused with exit 3 and a message that names the layer, before any distance is measured. This
+  holds for a `NaN` at the closing vertex of a polygon ring too. A
   `NaN` used to pass the area-of-use check and hide a real stub, so the run exited 0 on a case it
   could not evaluate. GeoJSON from standard tools never carries `NaN`.
 - A GeoJSON file saved with a UTF-8 byte order mark exits 2 with `Unexpected UTF-8 BOM (decode
@@ -793,9 +800,9 @@ keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as wr
   stderr on each run that reprojects a layer. This was seen on Linux with Python 3.12.3 and shapely
   2.2.0. The verdict and the exit code do not change, and the table in Requirements lists shapely only
   up to 2.1.2.
-- Do not run the tool with `python -W error`. The self-test then fails one assertion, because a
-  `nan` coordinate makes shapely warn and the run exits 2 instead of 3. With shapely 2.2 or newer, a
-  run that reprojects a layer exits 70 on the deprecation warning above.
+- Do not run the tool with `python -W error`. With shapely 2.2 or newer, a run that reprojects a
+  layer, and the self-test, exit 70 on the deprecation warning above. With shapely 2.1.2 the
+  self-test passes under `-W error`.
 - A GeoJSON file nested about 100000 levels deep hits the recursion limit of Python and exits 70
   with a `RecursionError` traceback.
 - A pyproj error other than a CRS error during a transform, such as a `ProjError`, exits 70 as a
@@ -810,6 +817,15 @@ keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as wr
 - The no-socket assertion replaces `socket.connect` in Python, so it cannot see a network fetch that
   the PROJ library makes by itself. That is the `PROJ_NETWORK=ON` case named below.
 - A character that the console cannot show prints as `?`. The file is always UTF-8.
+- A key whose real value starts with a minus sign, such as `-5`, is written as `'-5`, even when a
+  number was meant. Strip one apostrophe before you join the CSV to other data on the key.
+- The formula guard sits in `Finding.row()`, which every writer in this tool uses. A writer added later
+  that does not go through `row()` would be unguarded. The self-test pins the six columns on `row()` and
+  on the written file only.
+- Mean width is `2 x area / perimeter`, and the perimeter of a gap piece includes the rings of any
+  islands inside it. For a piece with islands the width gate sees a smaller width than the outer shape has.
+- The QGIS manual and Esri page claims in "What already exists" were read once when this was written.
+  They were not checked again against the live pages.
 - The ArcGIS pages for the "must not have gaps" and "must not have dangles" rules did not load when
   this was written, so the comparison above cites only the QGIS manual for those two rules.
 - Network: none. PROJ reads `PROJ_NETWORK` from the environment, and the tool never sets it
