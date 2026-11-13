@@ -120,7 +120,7 @@ every GIS can export.
 The self-test prints 287 assertions on every interpreter below, and each run ends with `287
 assertions, 0 failed`. `coverage run --branch ng911topo.py --self-test` reports 100 percent of
 1377 statements and 284 branches (run on the geo venv row). The count is the same on Windows and
-Linux because the self-test needs shapely and pyproj on both and uses no `arcpy`.
+Linux. The self-test needs shapely and pyproj on both and uses no `arcpy`.
 
 | Host | Python | shapely | pyproj |
 |---|---|---|---|
@@ -198,8 +198,9 @@ The `usage:` text is cut in this block to its first line. The tool prints the wh
 
 `--out` must not be an input layer. That is refused with exit 64, on a dry run too. A file that
 already exists is overwritten under `--apply`, with no prompt and no backup. The tool compares
-`--out` with the inputs by resolved path only, so a hard link or a Windows short-name alias of an
-input is not noticed. Do not give `--out` a hard link to an input.
+`--out` with the inputs by resolved path only, so a hard link to an input is not noticed. A Windows
+short-name (8.3) alias was not tried, because 8.3 names were off on the volume used. Do not give
+`--out` a hard link to an input.
 
 ## The demo files
 
@@ -677,7 +678,7 @@ and `y` are in the work CRS. A row sits inside the overlap or hole, so an analys
 The `key` and `other` columns, and the `detail` text that quotes them, come from the input file. A
 spreadsheet runs a cell that starts with `=`, `+`, `-` or `@` as a formula, and OWASP also lists a
 tab and a carriage return
-([CSV Injection](https://owasp.org/www-community/attacks/CSV_Injection)). The tool puts one
+([CSV Injection](https://community.owasp.org/attacks/CSV_Injection)). The tool puts one
 apostrophe in front of such a text cell. It guards the six text columns: `check`, `status`,
 `class`, `key`, `other` and `detail`. The `value`, `x` and `y` columns are numbers and are never
 changed, so a negative coordinate stays `-10.000`. Only the file is guarded. The terminal report
@@ -694,6 +695,20 @@ overlap,reported,overlap,'=SUM(1+1),'-ZONE-2,50.0000,400007.500,3250005.000,'=SU
 keyed `=SUM(1+1)` and `-ZONE-2`. Without the guard the file held both keys as written.
 
 ## Limits
+
+- The self-test parses `--overlap-tol`, `--gap-tol`, `--min-gap-width`, `--isolated-tol`,
+  `--node-tol`, `--bin` and `--min-boundary-cover`, and checks that each is accepted or rejected.
+  It does not run each one end to end with a value that changes the result. Each was run by hand
+  against the demo layers.
+- The Requirements table records the versions of the original runs. A fresh Linux install today
+  gets shapely 2.2.0, which prints the deprecation warning described below. The self-test still
+  prints 287 assertions, 0 failed.
+- The demo coordinates are synthetic but fall inside a real US county.
+- Commit messages in the history of this repo refer to an internal rule id. The code and this
+  README do not.
+- A GeoJSON `crs` member of type `link` is refused with exit 3. Only `name` members are read.
+- An EPSG code that PROJ lists without an area of use is not checked for its tag. The run prints a
+  note, the unit scale proof still runs, and the run can exit 0 with only that note.
 
 - It checks street ends against other streets. It does not yet check that a road crosses an
   area boundary without a split. The first plan for this repo listed that check. It is not built.
@@ -825,5 +840,7 @@ MIT.
 
 - [sidestamp](https://github.com/uhsear/sidestamp) checks the values stamped on each side of a
   centerline against the polygon that side fronts.
-- [ringwind](https://github.com/uhsear/ringwind) names GeoJSON rings wound the wrong way. Run it
-  first if a polygon is refused as not valid.
+- [ringwind](https://github.com/uhsear/ringwind) names GeoJSON rings wound the wrong way. Ring
+  winding does not decide whether this tool accepts a polygon: a clockwise exterior ring passes. A
+  polygon that is not valid, such as a bow tie, is refused with exit 3, and ringwind only reports it
+  as degenerate. Repair that polygon in your editing software.
